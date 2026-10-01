@@ -113,6 +113,49 @@ def lexical_rank(question, texts, min_score=1.2, top=3):
     return [k for k, sc in ranked[:top] if sc >= 0.5 * best]
 
 
+def _chunks(text, size=700):
+    """Режет текст на фрагменты ~size символов по границам строк."""
+    out, cur = [], ""
+    for line in re.split(r"\n+", text or ""):
+        line = line.strip()
+        if not line:
+            continue
+        if cur and len(cur) + len(line) > size:
+            out.append(cur)
+            cur = ""
+        cur = (cur + "\n" + line).strip()
+    if cur:
+        out.append(cur)
+    return out
+
+
+def passage_rank(question, texts, exclude=(), top=4, min_score=1.2):
+    """Лучшие фрагменты по словам вопроса среди всех документов (кроме exclude).
+    texts: {ключ: текст}. Возвращает [(ключ, фрагмент)] по убыванию релевантности."""
+    import math
+    stems = {_stem(w) for w in re.findall(r"[а-яёa-z0-9]{4,}", (question or "").lower()) if w not in _STOP}
+    if not stems:
+        return []
+    chunks = [(k, c, re.sub(r"\s+", " ", c.lower())) for k, t in texts.items() for c in _chunks(t)]
+    n = len(chunks)
+    if not n:
+        return []
+    idf = {}
+    for st in stems:
+        df = sum(1 for _, _, low in chunks if st in low)
+        if df:
+            idf[st] = math.log(1 + n / df)
+    scored = []
+    for k, c, low in chunks:
+        if k in exclude:
+            continue
+        sc = sum(w * (1 + 0.25 * math.log(low.count(st))) for st, w in idf.items() if st in low)
+        if sc >= min_score:
+            scored.append((sc, k, c))
+    scored.sort(key=lambda x: -x[0])
+    return [(k, c) for _, k, c in scored[:top]]
+
+
 class KB:
     def __init__(self, provider, notify=None):
         self.provider, self.notify = provider, notify
@@ -199,10 +242,11 @@ class KB:
         picks = await self.select(question, history, docs)
         cached = {d.file_id: self._texts[d.file_id][1] for d in docs if d.file_id in self._texts}
         have = {d.file_id for d in picks}
-        for fid in lexical_rank(question, cached):
-            if fid not in have and len(picks) < config.MAX_DOCS + 2:
-                picks.append(next(d for d in docs if d.file_id == fid))
-        if not picks:
+        by_id = {d.file_id: d for d in docs}
+        extra = {}
+        for fid, ch in passage_rank(question, cached, exclude=have):
+            extra.setdefault(fid, []).append(ch)
+        if not picks and not extra:
             return Answer(NOT_FOUND_TEXT, "Не найдено", [])
         texts = await asyncio.gather(*(self.text(d) for d in picks), return_exceptions=True)
         usable = []
@@ -211,13 +255,15 @@ class KB:
                 usable.append((d, t))
             else:
                 await self._alert("doc:" + d.file_id, f"Не удалось прочитать «{d.title}»: {t if isinstance(t, Exception) else 'пусто'}")
-        if not usable:
+        if not usable and not extra:
             raise RuntimeError("ни один из выбранных документов не прочитан")
-        per_doc = config.DOC_CHARS_TOTAL // len(usable)
+        per_doc = config.DOC_CHARS_TOTAL // max(len(usable), 1)
         block = "\n\n".join(f"=== ДОКУМЕНТ: {d.title} ===\n{t[:per_doc]}" for d, t in usable)
+        for fid, parts in extra.items():
+            block += f"\n\n=== ВЫДЕРЖКИ ИЗ ДОКУМЕНТА: {by_id[fid].title} ===\n" + "\n...\n".join(parts)
         messages = ([{"role": "system", "content": ANSWER_SYSTEM + "\n\nДОКУМЕНТЫ:\n" + block}]
                     + history + [{"role": "user", "content": question[:2000]}])
         out = await self.provider.chat(model or config.ANSWER_MODEL, messages, temperature=0.2, max_tokens=1200)
         if out.strip().upper().startswith("НЕТ_ОТВЕТА"):
             return Answer(NOT_FOUND_TEXT, "Не найдено", [])
-        return Answer(out, "Отвечено", [d.title for d, _ in usable])
+        return Answer(out, "Отвечено", [d.title for d, _ in usable] + [by_id[f].title for f in extra])
