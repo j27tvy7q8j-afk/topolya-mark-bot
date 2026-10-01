@@ -31,6 +31,10 @@ QUESTIONS = [
 ]
 
 
+CANDIDATES = ["deepseek-v32/latest", "deepseek-v32", "deepseek-v4-flash/latest", "deepseek-v4-flash",
+              "deepseek-v3.2/latest", "qwen3-235b-a22b-fp8/latest", "gpt-oss-120b/latest"]
+
+
 async def discover():
     r = httpx.get("https://llm.api.cloud.yandex.net/foundationModels/v1/models",
                   params={"folderId": config.YANDEX_FOLDER_ID},
@@ -49,7 +53,7 @@ def check(ans, groups, expect_answer):
         return ans.status == "Не найдено"
     if ans.status != "Отвечено":
         return False
-    low = ans.text.lower()
+    low = " ".join(ans.text.lower().replace("\u00a0", " ").replace("\u202f", " ").split())
     return all(any(s.lower() in low for s in g) for g in groups)
 
 
@@ -60,13 +64,15 @@ async def main():
     models = args.model
     if not models:
         models = [config.ANSWER_MODEL]
-        try:
-            found = await discover()
-            print("Модели в каталоге:", *found, sep="\n  ")
-            cand = [u for u in found if "deepseek" in u.lower()]
-            models += cand[:2]
-        except Exception as e:
-            print("Каталог моделей не получен:", e)
+        prov = llm.get_provider()
+        for name in CANDIDATES:
+            uri = f"gpt://{config.YANDEX_FOLDER_ID}/{name}"
+            try:
+                await prov.chat(uri, [{"role": "user", "content": "Ответь одним словом: да"}], max_tokens=20, timeout=40)
+                print("Модель доступна:", uri)
+                models.append(uri)
+            except Exception as e:
+                print("Нет модели", name, "-", str(e)[:90])
     models = list(dict.fromkeys(models))
     kb = kbmod.KB(llm.get_provider())
     results = {m: [] for m in models}

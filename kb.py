@@ -79,6 +79,40 @@ def keyword_pick(question, docs):
     return [i for _, i in scored[:config.MAX_DOCS]]
 
 
+_STOP = {"какой", "какие", "какая", "каком", "когда", "можно", "нужно", "есть", "делать", "сегодня",
+         "сколько", "почему", "чтобы", "этого", "если", "что", "как", "где", "при", "для", "или", "ещё", "надо"}
+
+
+def _stem(w):
+    return w if len(w) <= 4 else (w[:4] if len(w) <= 6 else w[:5])
+
+
+def lexical_rank(question, texts, min_score=1.2, top=3):
+    """Подбор документов по словам вопроса в полных текстах (запасной канал к выбору моделью).
+    texts: {ключ: текст}. Возвращает до top ключей; пусто, если слова вопроса нигде не встречаются."""
+    import math
+    stems = {_stem(w) for w in re.findall(r"[а-яёa-z0-9]{4,}", (question or "").lower()) if w not in _STOP}
+    if not stems or not texts:
+        return []
+    low = {k: re.sub(r"\s+", " ", t.lower()) for k, t in texts.items()}
+    n = len(low)
+    scores = {k: 0.0 for k in low}
+    for st in stems:
+        df = sum(1 for t in low.values() if st in t)
+        if not df:
+            continue
+        idf = math.log(1 + n / df)
+        for k, t in low.items():
+            c = t.count(st)
+            if c:
+                scores[k] += idf * (1 + 0.25 * math.log(c))
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+    best = ranked[0][1]
+    if best < min_score:
+        return []
+    return [k for k, sc in ranked[:top] if sc >= 0.5 * best]
+
+
 class KB:
     def __init__(self, provider, notify=None):
         self.provider, self.notify = provider, notify
@@ -163,6 +197,11 @@ class KB:
         if not docs:
             raise RuntimeError("реестр документов пуст")
         picks = await self.select(question, history, docs)
+        cached = {d.file_id: self._texts[d.file_id][1] for d in docs if d.file_id in self._texts}
+        have = {d.file_id for d in picks}
+        for fid in lexical_rank(question, cached):
+            if fid not in have and len(picks) < config.MAX_DOCS + 2:
+                picks.append(next(d for d in docs if d.file_id == fid))
         if not picks:
             return Answer(NOT_FOUND_TEXT, "Не найдено", [])
         texts = await asyncio.gather(*(self.text(d) for d in picks), return_exceptions=True)
