@@ -68,7 +68,7 @@ async def main():
         for name in CANDIDATES:
             uri = f"gpt://{config.YANDEX_FOLDER_ID}/{name}"
             try:
-                await prov.chat(uri, [{"role": "user", "content": "Ответь одним словом: да"}], max_tokens=20, timeout=40)
+                await prov.chat(uri, [{"role": "user", "content": "Ответь одним словом: да"}], max_tokens=600, timeout=90)
                 print("Модель доступна:", uri)
                 models.append(uri)
             except Exception as e:
