@@ -33,6 +33,9 @@ GAPS_DB_ID = _get("GAPS_DB_ID")        # «Марк — Пробелы в баз
 _owner = _get("OWNER_TELEGRAM_ID")
 OWNER_TELEGRAM_ID = int(_owner) if _owner.isdigit() else None  # куда слать тревоги
 
+HEALTHCHECK_URL = _get("HEALTHCHECK_URL")   # адрес «пинга» внешнего мониторинга (healthchecks.io), необязательно
+SNAPSHOT_DIR = os.path.join(BASE_DIR, "snapshots")
+
 CACHE_TTL = int(_get("CACHE_TTL_SECONDS", "720") or 720)  # кэш документов, сек (12 мин)
 SESSION_SECONDS = 3600     # сессия разговора: 1 час без сообщений
 HISTORY_MESSAGES = 10      # сколько последних сообщений помнит бот

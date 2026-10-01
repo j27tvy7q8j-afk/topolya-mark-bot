@@ -6,3 +6,4 @@ seen_docs.json
 *.old
 *.zip
 *.log
+snapshots/

@@ -1,6 +1,8 @@
 """База знаний: реестр документов (Notion) → тексты (Drive) → выбор документов → ответ модели."""
 import asyncio
+import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -157,11 +159,63 @@ def passage_rank(question, texts, exclude=(), top=4, min_score=1.2):
 
 
 class KB:
-    def __init__(self, provider, notify=None):
+    def __init__(self, provider, notify=None, snapshot=True):
         self.provider, self.notify = provider, notify
         self._catalog = (0.0, [])
         self._texts = {}              # file_id -> (время, текст)
         self._cat_lock = asyncio.Lock()
+        self.snapshot = snapshot
+        if snapshot:
+            self.load_snapshot()
+
+    # --- снимок на диске: бот отвечает, даже если Notion/Drive недоступны после перезапуска ---
+    def _snap_path(self, name="snapshot.json"):
+        return os.path.join(config.SNAPSHOT_DIR, name)
+
+    def save_snapshot(self):
+        """Сохраняет каталог и тексты. Раз в сутки делает копию (хранится 7 штук)."""
+        if not self.snapshot:
+            return
+        ts, docs = self._catalog
+        if not docs:
+            return
+        try:
+            os.makedirs(config.SNAPSHOT_DIR, mode=0o700, exist_ok=True)
+            data = {"saved": time.time(),
+                    "docs": [vars(d) for d in docs],
+                    "texts": {fid: t for fid, (_, t) in self._texts.items()}}
+            path = self._snap_path()
+            tmp = path + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, path)
+            daily = self._snap_path("snapshot-%s.json" % time.strftime("%Y-%m-%d"))
+            if not os.path.exists(daily):
+                import shutil
+                shutil.copy2(path, daily)
+                old = sorted(f for f in os.listdir(config.SNAPSHOT_DIR)
+                             if f.startswith("snapshot-") and f.endswith(".json"))
+                for f in old[:-7]:
+                    os.remove(os.path.join(config.SNAPSHOT_DIR, f))
+        except Exception as e:
+            log.warning("Снимок документов не сохранён: %s", e)
+
+    def load_snapshot(self):
+        try:
+            with open(self._snap_path(), encoding="utf-8") as f:
+                data = json.load(f)
+            docs = [Doc(**d) for d in data["docs"]]
+            saved = float(data.get("saved", 0))
+            # ts=0: каталог считается устаревшим и обновится из Notion, но при сбое Notion бот отвечает по снимку
+            self._catalog = (0.0, docs)
+            self._texts = {fid: (0.0, t) for fid, t in data["texts"].items()}
+            log.info("Загружен снимок документов: %d шт., от %s", len(docs),
+                     time.strftime("%d.%m.%Y %H:%M", time.localtime(saved)))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log.warning("Снимок документов не прочитан: %s", e)
 
     async def _alert(self, key, text):
         log.warning(text)

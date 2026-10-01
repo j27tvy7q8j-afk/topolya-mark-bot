@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+import httpx
 from collections import defaultdict, deque
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -306,6 +307,22 @@ async def new_docs_loop(app):
         await asyncio.sleep(900)
 
 
+async def heartbeat_loop(app: Application):
+    """Раз в 5 минут «пинг» во внешний мониторинг (healthchecks.io). Если пинги прекратились —
+    бот или сервер лежат, и сервис сам пишет владельцу. /fail — бот жив, но документы не обновляются >30 мин."""
+    url = config.HEALTHCHECK_URL
+    if not url:
+        return
+    while True:
+        try:
+            fresh = time.time() - app.bot_data.get("last_ok", 0) < 1800
+            async with httpx.AsyncClient(timeout=10) as c:
+                await c.get(url if fresh else url.rstrip("/") + "/fail")
+        except Exception as e:
+            log.warning("Пинг мониторинга не прошёл: %s", e)
+        await asyncio.sleep(300)
+
+
 async def post_init(app: Application):
     async def warm():
         """Прогрев при старте и затем обновление ВСЕХ документов каждые ~10 минут:
@@ -322,12 +339,16 @@ async def post_init(app: Application):
                     except Exception as e:
                         log.warning("Не обновлён «%s»: %s", d.title, e)
                 log.info("Кэш обновлён: %d из %d документов", ok, len(docs))
+                if ok:
+                    app.bot_data["last_ok"] = time.time()
+                    await asyncio.to_thread(kb.save_snapshot)
             except Exception as e:
                 log.warning("Обновление кэша не удалось: %s", e)
             await asyncio.sleep(600)
     app.bot_data["notifier"] = Notifier(app)
     app.bot_data["kb"] = KB(llm.get_provider(), app.bot_data["notifier"])
     spawn(warm())
+    spawn(heartbeat_loop(app))
     spawn(welcome_loop(app))
     spawn(new_docs_loop(app))
 
