@@ -202,9 +202,9 @@ class KB:
             return drive_reader.read_sheet(doc.file_id, config.SHEET_TABS.get(_norm(doc.title)))
         return drive_reader.read_document(doc.file_id)
 
-    async def text(self, doc):
+    async def text(self, doc, force=False):
         cached = self._texts.get(doc.file_id)
-        if cached and time.time() - cached[0] < config.CACHE_TTL:
+        if cached and not force and time.time() - cached[0] < config.CACHE_TTL:
             return cached[1]
         try:
             txt = await asyncio.to_thread(self._read, doc)

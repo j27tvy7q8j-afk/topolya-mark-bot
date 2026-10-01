@@ -308,19 +308,23 @@ async def new_docs_loop(app):
 
 async def post_init(app: Application):
     async def warm():
-        try:
-            kb: KB = app.bot_data["kb"]
-            docs = await kb.catalog()
-            ok = 0
-            for d in docs:
-                try:
-                    await kb.text(d)
-                    ok += 1
-                except Exception as e:
-                    log.warning("Не прогрет «%s»: %s", d.title, e)
-            log.info("Кэш прогрет: %d из %d документов", ok, len(docs))
-        except Exception as e:
-            log.warning("Прогрев кэша не удался: %s", e)
+        """Прогрев при старте и затем обновление ВСЕХ документов каждые ~10 минут:
+        поиск по фрагментам работает по кэшу, он не должен устаревать."""
+        while True:
+            try:
+                kb: KB = app.bot_data["kb"]
+                docs = await kb.catalog()
+                ok = 0
+                for d in docs:
+                    try:
+                        await kb.text(d, force=True)
+                        ok += 1
+                    except Exception as e:
+                        log.warning("Не обновлён «%s»: %s", d.title, e)
+                log.info("Кэш обновлён: %d из %d документов", ok, len(docs))
+            except Exception as e:
+                log.warning("Обновление кэша не удалось: %s", e)
+            await asyncio.sleep(600)
     app.bot_data["notifier"] = Notifier(app)
     app.bot_data["kb"] = KB(llm.get_provider(), app.bot_data["notifier"])
     spawn(warm())

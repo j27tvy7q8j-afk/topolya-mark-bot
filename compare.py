@@ -75,6 +75,11 @@ async def main():
                 print("Нет модели", name, "-", str(e)[:90])
     models = list(dict.fromkeys(models))
     kb = kbmod.KB(llm.get_provider())
+    for d in await kb.catalog():      # прогрев кэша, как у настоящего бота
+        try:
+            await kb.text(d)
+        except Exception as e:
+            print("Не прочитан", d.title, "-", str(e)[:80])
     results = {m: [] for m in models}
     report = []
     for q, groups, expect in QUESTIONS:
