@@ -30,5 +30,7 @@ venv/bin/python selftest.py >/tmp/mark-selftest.log 2>&1 || rollback "selftest: 
 systemctl restart mark-bot
 sleep 6
 systemctl is-active --quiet mark-bot || rollback "сервис не запустился"
-alert "✅ Марк обновлён: ${OLD:0:7} → ${NEW:0:7}. $(git log -1 --pretty=%s)"
+CHK=$(grep -E "ВНИМАНИЕ|База «(Ознакомления|Результаты тестов)»" /tmp/mark-selftest.log | head -3)
+alert "✅ Марк обновлён: ${OLD:0:7} → ${NEW:0:7}. $(git log -1 --pretty=%s)${CHK:+
+$CHK}"
 echo "обновлено до $NEW"

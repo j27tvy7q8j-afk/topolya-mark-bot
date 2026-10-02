@@ -33,7 +33,7 @@ GAPS_DB_ID = _get("GAPS_DB_ID")        # «Марк — Пробелы в баз
 # ID баз не секретны (без токена интеграции они бесполезны), поэтому заданы по умолчанию; .env может переопределить
 ACK_DB_ID = _get("ACK_DB_ID") or "9f4f6d47b8414485841eee1998bc79f1"          # «Марк — Ознакомления» (необязательно: без него рассылка выключена)
 QUIZ_DB_ID = _get("QUIZ_DB_ID") or "ac84a8c5cc9f4f8bbcb8be8fb44b7750"        # «Марк — Результаты тестов» (необязательно)
-QUIZ_WEEKLY = _get("QUIZ_WEEKLY", "0") in ("1", "true", "yes")  # автоматический тест раз в неделю (пн 11:00 МСК)
+QUIZ_WEEKLY = _get("QUIZ_WEEKLY", "1") in ("1", "true", "yes")  # автотест раз в неделю (пн 11:00 МСК); выключить: QUIZ_WEEKLY=0
 
 _owner = _get("OWNER_TELEGRAM_ID")
 OWNER_TELEGRAM_ID = int(_owner) if _owner.isdigit() else None  # куда слать тревоги
