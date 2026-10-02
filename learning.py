@@ -707,3 +707,36 @@ async def set_menu(app):
                 scope=BotCommandScopeChat(config.OWNER_TELEGRAM_ID))
     except Exception as e:
         log.warning("Меню команд не установлено: %s", e)
+
+
+async def startup_check(app):
+    """После запуска проверяет доступ к базам рассылок и тестов. Владельцу: один раз «готово» или тревога, если нет доступа."""
+    await asyncio.sleep(30)
+    bad = []
+    for name, db in (("Марк — Ознакомления", config.ACK_DB_ID), ("Марк — Результаты тестов", config.QUIZ_DB_ID)):
+        try:
+            await notion_api.ping(db)
+        except Exception as e:
+            log.warning("База «%s» недоступна: %s", name, e)
+            bad.append(name)
+    if not config.OWNER_TELEGRAM_ID:
+        return
+    st = load_state()
+    if bad:
+        try:
+            from bot import get_notifier
+            await get_notifier(app)("learning-db",
+                "рассылки и тесты не работают: у интеграции «Марк» нет доступа к базам: " + ", ".join(bad) +
+                ". В Notion откройте «Служебные базы» → «···» → «Подключения» и подключите «Марк» к этим базам.")
+        except Exception:
+            log.exception("не удалось отправить тревогу о базах")
+    elif not st.get("ready_notified"):
+        try:
+            await app.bot.send_message(
+                config.OWNER_TELEGRAM_ID,
+                "✅ Рассылки и мини-тесты готовы: базы доступны. Рассылка: /announce в меню (бот также сам предложит при "
+                "изменении или новом документе). Пробный тест: /quiz_now. Автотест по понедельникам в 11:00 (МСК) включён.")
+            st["ready_notified"] = True
+            save_state(st)
+        except Exception:
+            log.exception("не удалось отправить уведомление о готовности")

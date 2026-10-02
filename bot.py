@@ -358,6 +358,7 @@ async def post_init(app: Application):
     spawn(learning.quiz_loop(app))
     spawn(learning.watch_loop(app))
     spawn(learning.set_menu(app))
+    spawn(learning.startup_check(app))
 
 
 def main():
