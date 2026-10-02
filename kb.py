@@ -260,13 +260,24 @@ class KB:
         cached = self._texts.get(doc.file_id)
         if cached and not force and time.time() - cached[0] < config.CACHE_TTL:
             return cached[1]
-        try:
-            txt = await asyncio.to_thread(self._read, doc)
-        except Exception as e:
+        txt, err = None, None
+        for attempt in range(3):          # разовые сбои Google (таймаут, 500) обычно проходят сразу
+            try:
+                txt = await asyncio.to_thread(self._read, doc)
+                break
+            except Exception as e:
+                err = e
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+        if txt is None:
             if cached:
-                await self._alert("drive", f"Drive недоступен для «{doc.title}» ({e}); отвечаю по сохранённой копии.")
+                # тревога только если копия устарела больше чем на 30 минут (сбой затяжной)
+                if time.time() - cached[0] > 1800:
+                    await self._alert("drive", f"Drive недоступен для «{doc.title}» ({err}); отвечаю по сохранённой копии.")
+                else:
+                    log.warning("Drive: разовый сбой для «%s» (%s), копия свежая", doc.title, err)
                 return cached[1]
-            raise
+            raise err
         self._texts[doc.file_id] = (time.time(), txt)
         return txt
 
