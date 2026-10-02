@@ -244,35 +244,31 @@ REVIEW_REASONS = ["Нет в документе или устарело", "Юр�
 
 
 def _review_filter():
-    return {"and": [{"property": "Проверка", "select": {"is_empty": True}},
-                    {"property": "Статус", "select": {"equals": "Отвечено"}}]}
+    return {"property": "Проверка", "select": {"is_empty": True}}
 
 
 async def review_pending():
-    """Непроверенные ответы, старые первыми: [{id, question, answer, source, who, when}]."""
-    body = {"page_size": 100, "filter": _review_filter(),
-            "sorts": [{"property": "Дата и время", "direction": "ascending"}]}
-    data = await _req("POST", f"/databases/{config.JOURNAL_DB_ID}/query", body)
-    out = []
-    for r in data["results"]:
-        p = r["properties"]
-        out.append({"id": r["id"].replace("-", ""), "question": _text(p.get("Вопрос")), "answer": _text(p.get("Ответ")),
-                    "source": _text(p.get("Документ-источник")), "who": _text(p.get("Сотрудник")),
-                    "when": ((p.get("Дата и время") or {}).get("date") or {}).get("start", "")})
-    return out
-
-
-async def review_count():
-    n, cursor = 0, None
+    """Непроверенные записи журнала (и ответы, и «Не найдено»), старые первыми."""
+    out, cursor = [], None
     while True:
-        body = {"page_size": 100, "filter": _review_filter()}
+        body = {"page_size": 100, "filter": _review_filter(),
+                "sorts": [{"property": "Дата и время", "direction": "ascending"}]}
         if cursor:
             body["start_cursor"] = cursor
         data = await _req("POST", f"/databases/{config.JOURNAL_DB_ID}/query", body)
-        n += len(data["results"])
+        for r in data["results"]:
+            p = r["properties"]
+            out.append({"id": r["id"].replace("-", ""), "question": _text(p.get("Вопрос")), "answer": _text(p.get("Ответ")),
+                        "source": _text(p.get("Документ-источник")), "who": _text(p.get("Сотрудник")),
+                        "status": _text(p.get("Статус")),
+                        "when": ((p.get("Дата и время") or {}).get("date") or {}).get("start", "")})
         if not data.get("has_more"):
-            return n
+            return out
         cursor = data["next_cursor"]
+
+
+async def review_count():
+    return len(await review_pending())
 
 
 async def review_set(page_id, verdict, reason=None, comment=None):
@@ -282,3 +278,23 @@ async def review_set(page_id, verdict, reason=None, comment=None):
     if comment is not None:
         props["Комментарий проверяющего"] = _rt(comment)
     await _req("PATCH", f"/pages/{page_id}", {"properties": props})
+
+
+async def gap_set(question, status, comment=None):
+    """Все новые строки «Пробелов» с этим вопросом: поставить статус (и комментарий владельца)."""
+    flt = {"and": [{"property": "Вопрос", "title": {"equals": question[:300]}},
+                   {"property": "Статус", "select": {"equals": "Новый"}}]}
+    for r in await query_all(config.GAPS_DB_ID, flt):
+        props = {"Статус": {"select": {"name": status}}}
+        if comment is not None:
+            props["Комментарий владельца"] = _rt(comment)
+        await _req("PATCH", f"/pages/{r['id']}", {"properties": props})
+
+
+async def gap_set_comment(question, comment):
+    """Комментарий владельца в уже обработанные строки «Пробелов» с этим вопросом."""
+    flt = {"and": [{"property": "Вопрос", "title": {"equals": question[:300]}},
+                   {"or": [{"property": "Статус", "select": {"equals": "Дополнить документ"}},
+                           {"property": "Статус", "select": {"equals": "Ошибка поиска"}}]}]}
+    for r in await query_all(config.GAPS_DB_ID, flt):
+        await _req("PATCH", f"/pages/{r['id']}", {"properties": {"Комментарий владельца": _rt(comment)}})

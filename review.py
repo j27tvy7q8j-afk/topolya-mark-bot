@@ -27,7 +27,34 @@ def _when(s):
         return s[:10]
 
 
+def _norm(q):
+    return " ".join("".join(ch if ch.isalnum() else " " for ch in (q or "").lower().replace("ё", "е")).split())
+
+
+def build_queue(items):
+    """Ответы по одному; «Не найдено» с одинаковым вопросом — одной карточкой: [{..., ids, n}]."""
+    out, groups = [], {}
+    for it in items:
+        if it.get("status") == "Не найдено":
+            k = _norm(it["question"])
+            if k in groups:
+                groups[k]["ids"].append(it["id"])
+                groups[k]["n"] += 1
+                continue
+            it = dict(it, ids=[it["id"]], n=1)
+            groups[k] = it
+        else:
+            it = dict(it, ids=[it["id"]], n=1)
+        out.append(it)
+    return out
+
+
 def card_text(it, left):
+    if it.get("status") == "Не найдено":
+        times = f" (спросили {it['n']} раз)" if it["n"] > 1 else ""
+        return (f"📭 Марк не нашёл ответ в документах{times}\n(осталось: {left})\n\n"
+                f"Вопрос: {it['question']}\n"
+                f"Спросил(а): {it['who'] or '—'}, {_when(it['when'])}")
     ans = it["answer"] if len(it["answer"]) < 2500 else it["answer"][:2500] + "…"
     return (f"🔍 Проверка ответа (осталось: {left})\n\n"
             f"Вопрос: {it['question']}\n"
@@ -36,28 +63,40 @@ def card_text(it, left):
             f"Документ: {it['source'] or 'не указан'}")
 
 
-def card_markup(pid):
+def card_markup(it):
+    pid = it["id"]
+    tail = [InlineKeyboardButton("⏭ Позже", callback_data=f"rv:skip:{pid}"),
+            InlineKeyboardButton("Закончить", callback_data="rv:stop:-")]
+    if it.get("status") == "Не найдено":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Это пробел: в документах этого нет", callback_data=f"rv:gap:{pid}")],
+            [InlineKeyboardButton("🔎 В документах это есть", callback_data=f"rv:find:{pid}")],
+            [InlineKeyboardButton("🗑 Не по теме", callback_data=f"rv:off:{pid}")], tail])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Верно", callback_data=f"rv:ok:{pid}"),
-         InlineKeyboardButton("❌ Неверно", callback_data=f"rv:bad:{pid}")],
-        [InlineKeyboardButton("⏭ Позже", callback_data=f"rv:skip:{pid}"),
-         InlineKeyboardButton("Закончить", callback_data="rv:stop:-")]])
+         InlineKeyboardButton("❌ Неверно", callback_data=f"rv:bad:{pid}")], tail])
+
+
+def _ids(app, pid):
+    return app.bot_data.get("rv_groups", {}).get(pid) or [pid]
 
 
 async def next_card(app, edit=None):
     """Показать следующую карточку. edit — сообщение, которое заменить."""
     skip = app.bot_data.setdefault("rv_skip", set())
     try:
-        items = [i for i in await notion_api.review_pending() if i["id"] not in skip]
+        queue = [i for i in build_queue(await notion_api.review_pending()) if i["id"] not in skip]
     except Exception as e:
         log.warning("Очередь проверки не получена: %s", e)
-        items = None
-    if items is None:
+        queue = None
+    if queue is None:
         text, kbd = "Не удалось открыть журнал. Попробуйте ещё раз через минуту.", None
-    elif not items:
+    elif not queue:
         text, kbd = "Все ответы проверены ✅", None
     else:
-        text, kbd = card_text(items[0], len(items)), card_markup(items[0]["id"])
+        app.bot_data["rv_groups"] = {i["id"]: i["ids"] for i in queue}
+        app.bot_data["rv_q"] = {i["id"]: i["question"] for i in queue}
+        text, kbd = card_text(queue[0], len(queue)), card_markup(queue[0])
     if edit is not None:
         try:
             await edit.edit_message_text(text, reply_markup=kbd)
@@ -72,6 +111,22 @@ async def start(app):
     await next_card(app)
 
 
+async def _write(q, fn):
+    try:
+        await fn()
+        return True
+    except Exception as e:
+        log.warning("Оценка не записана: %s", e)
+        await q.answer("Не удалось записать. Нажмите ещё раз.", show_alert=True)
+        return False
+
+
+async def _ask_text(app, q, pid, kind, prompt):
+    app.bot_data["rv_flow"] = {"pid": pid, "kind": kind, "ts": time.time()}
+    await q.edit_message_text(prompt, reply_markup=InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Без комментария", callback_data=f"rv:nc:{pid}")]]))
+
+
 async def on_review_button(update, ctx):
     q = update.callback_query
     if not _owner_q(q):
@@ -79,6 +134,7 @@ async def on_review_button(update, ctx):
         return
     _, act, pid = q.data.split(":", 2)
     app = ctx.application
+    ids = _ids(app, pid)
     if act == "stop":
         await q.answer()
         app.bot_data.pop("rv_flow", None)
@@ -90,14 +146,12 @@ async def on_review_button(update, ctx):
         await next_card(app, edit=q)
         return
     if act == "ok":
-        try:
-            await notion_api.review_set(pid, "Верно")
-        except Exception as e:
-            log.warning("Оценка не записана: %s", e)
-            await q.answer("Не удалось записать. Нажмите ещё раз.", show_alert=True)
-            return
-        await q.answer("Записано")
-        await next_card(app, edit=q)
+        async def f():
+            for i in ids:
+                await notion_api.review_set(i, "Верно")
+        if await _write(q, f):
+            await q.answer("Записано")
+            await next_card(app, edit=q)
         return
     if act == "bad":
         await q.answer()
@@ -109,17 +163,35 @@ async def on_review_button(update, ctx):
     if act.startswith("r") and act[1:].isdigit():
         i = int(act[1:])
         reason = REASONS[i] if i < len(REASONS) else None
-        try:
-            await notion_api.review_set(pid, "Неверно", reason=reason)
-        except Exception as e:
-            log.warning("Оценка не записана: %s", e)
-            await q.answer("Не удалось записать. Нажмите ещё раз.", show_alert=True)
+        if await _write(q, lambda: notion_api.review_set(pid, "Неверно", reason=reason)):
+            await q.answer("Записано")
+            await _ask_text(app, q, pid, "bad",
+                            "Напишите одним сообщением, в чём ошибка и как должно быть. Или нажмите «Без комментария».")
+        return
+    if act in ("gap", "find", "off"):
+        question = (app.bot_data.get("rv_q") or {}).get(pid, "")
+
+        async def f():
+            for i in ids:
+                if act == "find":
+                    await notion_api.review_set(i, "Неверно", reason="Выбран не тот фрагмент")
+                else:
+                    await notion_api.review_set(i, "Верно")
+            if question:
+                await notion_api.gap_set(question, {"gap": "Дополнить документ", "find": "Ошибка поиска",
+                                                    "off": "Оставить как есть"}[act])
+        if not await _write(q, f):
             return
         await q.answer("Записано")
-        app.bot_data["rv_flow"] = {"pid": pid, "ts": time.time()}
-        await q.edit_message_text(
-            "Напишите одним сообщением, в чём ошибка и как должно быть. Или нажмите «Без комментария».",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Без комментария", callback_data=f"rv:nc:{pid}")]]))
+        if act == "off":
+            await next_card(app, edit=q)
+        elif act == "gap":
+            await _ask_text(app, q, pid, "gap",
+                            "Напишите коротко, как это должно решаться (например: «заезд с животными разрешён, доплата 500 ₽»). "
+                            "Это набросок: формулировку для документа подготовит чат «07 Документы». "
+                            "Или нажмите «Без комментария».")
+        else:
+            await _ask_text(app, q, pid, "find", "В каком документе это есть? Напишите название. Или нажмите «Без комментария».")
         return
     if act == "nc":
         await q.answer()
@@ -128,22 +200,30 @@ async def on_review_button(update, ctx):
 
 
 async def comment_text(update, ctx):
-    """Текст владельца как комментарий к неверному ответу. True — обработано."""
-    flow = ctx.application.bot_data.get("rv_flow")
+    """Текст владельца как комментарий к проверке. True — обработано."""
+    app = ctx.application
+    flow = app.bot_data.get("rv_flow")
     u = update.effective_user
     if not flow or not u or u.id != config.OWNER_TELEGRAM_ID:
         return False
     if time.time() - flow["ts"] > 3600:
-        ctx.application.bot_data.pop("rv_flow", None)
+        app.bot_data.pop("rv_flow", None)
         return False
-    ctx.application.bot_data.pop("rv_flow", None)
+    app.bot_data.pop("rv_flow", None)
+    text = (update.effective_message.text or "").strip()[:1900]
+    pid, kind = flow["pid"], flow["kind"]
     try:
-        await notion_api.review_set(flow["pid"], "Неверно", comment=(update.effective_message.text or "").strip()[:1900])
+        for i in _ids(app, pid):
+            await notion_api.review_set(i, "Неверно" if kind in ("bad", "find") else "Верно", comment=text)
+        if kind in ("gap", "find"):
+            q = (app.bot_data.get("rv_q") or {}).get(pid, "")
+            if q:
+                await notion_api.gap_set_comment(q, text)
         await update.effective_message.reply_text("Записал.")
     except Exception as e:
         log.warning("Комментарий не записан: %s", e)
         await update.effective_message.reply_text("Не удалось записать комментарий. Добавьте его в журнале Notion.")
-    await next_card(ctx.application)
+    await next_card(app)
     return True
 
 
