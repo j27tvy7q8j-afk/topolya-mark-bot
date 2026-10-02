@@ -84,6 +84,16 @@ async def main():
             ok(True, f"База «{name}» доступна")
         except Exception as e:
             ok(False, f"База «{name}»: {str(e)[:150]}")
+    # 2а. Необязательные базы (рассылки и тесты): сбой не считается ошибкой обновления, только предупреждение
+    for name, db in (("Ознакомления", config.ACK_DB_ID), ("Результаты тестов", config.QUIZ_DB_ID)):
+        if not db:
+            print(f"--   База «{name}» не подключена (ID не задан), функция выключена")
+            continue
+        try:
+            await notion_api.ping(db)
+            print(f"OK   База «{name}» доступна")
+        except Exception as e:
+            print(f"ВНИМАНИЕ База «{name}» недоступна: {str(e)[:120]} (функция работать не будет)")
     # 3. Модели
     for m in dict.fromkeys([config.SELECT_MODEL, config.ANSWER_MODEL]):
         try:

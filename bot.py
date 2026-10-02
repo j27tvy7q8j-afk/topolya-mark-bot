@@ -15,6 +15,7 @@ from telegram.ext import (Application, ApplicationBuilder, CommandHandler, Conte
 
 import config
 import drive_reader
+import learning
 import llm
 import notion_api
 from kb import KB
@@ -164,6 +165,8 @@ async def log_event(staff, user, question, ans):
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if await learning.owner_flow_text(update, ctx):
+        return
     question = extract_question(chat.type, msg.text, config.BOT_USERNAME)
     if question is None:
         return
@@ -351,6 +354,8 @@ async def post_init(app: Application):
     spawn(heartbeat_loop(app))
     spawn(welcome_loop(app))
     spawn(new_docs_loop(app))
+    spawn(learning.reminder_loop(app))
+    spawn(learning.quiz_loop(app))
 
 
 def main():
@@ -362,6 +367,13 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(on_connect_button, pattern=r"^(add|skip):"))
+    app.add_handler(CommandHandler("announce", learning.cmd_announce))
+    app.add_handler(CommandHandler("cancel", learning.cmd_cancel))
+    app.add_handler(CommandHandler("quiz_now", learning.cmd_quiz_now))
+    app.add_handler(CallbackQueryHandler(learning.on_announce_pick, pattern=r"^an:\d+$"))
+    app.add_handler(CallbackQueryHandler(learning.on_announce_confirm, pattern=r"^an(send|cancel)$"))
+    app.add_handler(CallbackQueryHandler(learning.on_ack_button, pattern=r"^ack:"))
+    app.add_handler(CallbackQueryHandler(learning.on_quiz_button, pattern=r"^qz:"))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("Марк запущен: выбор=%s, ответ=%s", config.SELECT_MODEL, config.ANSWER_MODEL)

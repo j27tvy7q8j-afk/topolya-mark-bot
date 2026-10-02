@@ -30,6 +30,10 @@ STAFF_DB_ID = _get("STAFF_DB_ID")      # «Марк — Сотрудники»
 JOURNAL_DB_ID = _get("JOURNAL_DB_ID")  # «Марк — Журнал вопросов»
 GAPS_DB_ID = _get("GAPS_DB_ID")        # «Марк — Пробелы в базе знаний»
 
+ACK_DB_ID = _get("ACK_DB_ID")          # «Марк — Ознакомления» (необязательно: без него рассылка выключена)
+QUIZ_DB_ID = _get("QUIZ_DB_ID")        # «Марк — Результаты тестов» (необязательно)
+QUIZ_WEEKLY = _get("QUIZ_WEEKLY", "0") in ("1", "true", "yes")  # автоматический тест раз в неделю (пн 11:00 МСК)
+
 _owner = _get("OWNER_TELEGRAM_ID")
 OWNER_TELEGRAM_ID = int(_owner) if _owner.isdigit() else None  # куда слать тревоги
 

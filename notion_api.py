@@ -167,3 +167,72 @@ async def log_gap(question, staff_name):
              "Дата": {"date": {"start": _now()}}, "Сотрудник": _rt(staff_name),
              "Статус": {"select": {"name": "Новый"}}}
     await _req("POST", "/pages", {"parent": {"database_id": config.GAPS_DB_ID}, "properties": props})
+
+
+# ---------- Ознакомление с документами и мини-тесты ----------
+
+async def active_staff():
+    """Все активные сотрудники с Telegram ID: [{page_id, tg_id, name}]."""
+    flt = {"and": [{"property": "Статус", "select": {"equals": "Активен"}},
+                   {"property": "Telegram ID", "number": {"is_not_empty": True}}]}
+    out = []
+    for r in await query_all(config.STAFF_DB_ID, flt):
+        pr = r["properties"]
+        tg = (pr.get("Telegram ID") or {}).get("number")
+        if tg:
+            out.append({"page_id": r["id"], "tg_id": int(tg), "name": _text(pr.get("Имя")).strip()})
+    return out
+
+
+def _title(text):
+    return {"title": [{"text": {"content": (text or "—")[:300]}}]}
+
+
+async def ack_create(doc_title, change, name, tg_id, bid):
+    props = {"Документ": _title(doc_title), "Что изменилось": _rt(change), "Сотрудник": _rt(name),
+             "Telegram ID": {"number": tg_id}, "Отправлено": {"date": {"start": _now()}},
+             "Ознакомился": {"checkbox": False}, "Напоминаний": {"number": 0}, "Рассылка": _rt(bid)}
+    page = await _req("POST", "/pages", {"parent": {"database_id": config.ACK_DB_ID}, "properties": props})
+    return page["id"]
+
+
+def _ack_row(r):
+    pr = r["properties"]
+    sent = ((pr.get("Отправлено") or {}).get("date") or {}).get("start")
+    return {"page_id": r["id"], "doc": _text(pr.get("Документ")), "change": _text(pr.get("Что изменилось")),
+            "name": _text(pr.get("Сотрудник")), "tg_id": int((pr.get("Telegram ID") or {}).get("number") or 0),
+            "done": bool((pr.get("Ознакомился") or {}).get("checkbox")),
+            "reminders": int((pr.get("Напоминаний") or {}).get("number") or 0),
+            "sent": datetime.fromisoformat(sent) if sent else None, "bid": _text(pr.get("Рассылка"))}
+
+
+async def ack_get(page_id):
+    return _ack_row(await _req("GET", f"/pages/{page_id}"))
+
+
+async def ack_mark(page_id):
+    await _req("PATCH", f"/pages/{page_id}", {"properties": {
+        "Ознакомился": {"checkbox": True}, "Дата ознакомления": {"date": {"start": _now()}}}})
+
+
+async def ack_open():
+    """Строки, где ознакомления ещё нет (и не закрыты после эскалации): список dict."""
+    flt = {"and": [{"property": "Ознакомился", "checkbox": {"equals": False}},
+                   {"property": "Напоминаний", "number": {"less_than": 3}}]}
+    return [_ack_row(r) for r in await query_all(config.ACK_DB_ID, flt)]
+
+
+async def ack_set_reminders(page_id, n):
+    await _req("PATCH", f"/pages/{page_id}", {"properties": {"Напоминаний": {"number": n}}})
+
+
+async def quiz_log(question, doc, name, tg_id, chosen, correct_text, ok, test_id):
+    props = {"Вопрос": _title(question), "Дата": {"date": {"start": _now()}}, "Сотрудник": _rt(name),
+             "Telegram ID": {"number": tg_id}, "Документ": _rt(doc), "Верно": {"checkbox": bool(ok)},
+             "Ответ сотрудника": _rt(chosen), "Правильный ответ": _rt(correct_text), "Тест": _rt(test_id)}
+    await _req("POST", "/pages", {"parent": {"database_id": config.QUIZ_DB_ID}, "properties": props})
+
+
+async def ack_archive(page_id):
+    """Убирает строку (рассылка не доставлена)."""
+    await _req("PATCH", f"/pages/{page_id}", {"archived": True})

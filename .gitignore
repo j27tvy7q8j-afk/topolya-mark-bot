@@ -7,3 +7,5 @@ seen_docs.json
 *.zip
 *.log
 snapshots/
+quiz_state.json
+learning_state.json
