@@ -294,7 +294,6 @@ async def gap_set(question, status, comment=None):
 async def gap_set_comment(question, comment):
     """Комментарий владельца в уже обработанные строки «Пробелов» с этим вопросом."""
     flt = {"and": [{"property": "Вопрос", "title": {"equals": question[:300]}},
-                   {"or": [{"property": "Статус", "select": {"equals": "Дополнить документ"}},
-                           {"property": "Статус", "select": {"equals": "Ошибка поиска"}}]}]}
+                   {"property": "Статус", "select": {"equals": "Проработать"}}]}
     for r in await query_all(config.GAPS_DB_ID, flt):
         await _req("PATCH", f"/pages/{r['id']}", {"properties": {"Комментарий владельца": _rt(comment)}})

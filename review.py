@@ -69,9 +69,8 @@ def card_markup(it):
             InlineKeyboardButton("Закончить", callback_data="rv:stop:-")]
     if it.get("status") == "Не найдено":
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Это пробел: в документах этого нет", callback_data=f"rv:gap:{pid}")],
-            [InlineKeyboardButton("🔎 В документах это есть", callback_data=f"rv:find:{pid}")],
-            [InlineKeyboardButton("🗑 Не по теме", callback_data=f"rv:off:{pid}")], tail])
+            [InlineKeyboardButton("🛠 Проработать", callback_data=f"rv:gap:{pid}"),
+             InlineKeyboardButton("🗑 Не по теме", callback_data=f"rv:off:{pid}")], tail])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Верно", callback_data=f"rv:ok:{pid}"),
          InlineKeyboardButton("❌ Неверно", callback_data=f"rv:bad:{pid}")], tail])
@@ -168,18 +167,14 @@ async def on_review_button(update, ctx):
             await _ask_text(app, q, pid, "bad",
                             "Напишите одним сообщением, в чём ошибка и как должно быть. Или нажмите «Без комментария».")
         return
-    if act in ("gap", "find", "off"):
+    if act in ("gap", "off"):
         question = (app.bot_data.get("rv_q") or {}).get(pid, "")
 
         async def f():
             for i in ids:
-                if act == "find":
-                    await notion_api.review_set(i, "Неверно", reason="Выбран не тот фрагмент")
-                else:
-                    await notion_api.review_set(i, "Верно")
+                await notion_api.review_set(i, "Неверно" if act == "gap" else "Верно")
             if question:
-                await notion_api.gap_set(question, {"gap": "Дополнить документ", "find": "Ошибка поиска",
-                                                    "off": "Оставить как есть"}[act])
+                await notion_api.gap_set(question, "Проработать" if act == "gap" else "Оставить как есть")
         if not await _write(q, f):
             return
         await q.answer("Записано")
@@ -187,11 +182,9 @@ async def on_review_button(update, ctx):
             await next_card(app, edit=q)
         elif act == "gap":
             await _ask_text(app, q, pid, "gap",
-                            "Напишите коротко, как это должно решаться (например: «заезд с животными разрешён, доплата 500 ₽»). "
-                            "Это набросок: формулировку для документа подготовит чат «07 Документы». "
+                            "Если знаете, как должен звучать ответ, напишите коротко (например: «заезд с животными разрешён, "
+                            "доплата 500 ₽»). Это набросок: что и где менять в документах, определим при разборе. "
                             "Или нажмите «Без комментария».")
-        else:
-            await _ask_text(app, q, pid, "find", "В каком документе это есть? Напишите название. Или нажмите «Без комментария».")
         return
     if act == "nc":
         await q.answer()
@@ -214,8 +207,8 @@ async def comment_text(update, ctx):
     pid, kind = flow["pid"], flow["kind"]
     try:
         for i in _ids(app, pid):
-            await notion_api.review_set(i, "Неверно" if kind in ("bad", "find") else "Верно", comment=text)
-        if kind in ("gap", "find"):
+            await notion_api.review_set(i, "Неверно" if kind == "bad" or kind == "gap" else "Верно", comment=text)
+        if kind == "gap":
             q = (app.bot_data.get("rv_q") or {}).get(pid, "")
             if q:
                 await notion_api.gap_set_comment(q, text)
