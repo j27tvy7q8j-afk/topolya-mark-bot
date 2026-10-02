@@ -356,6 +356,8 @@ async def post_init(app: Application):
     spawn(new_docs_loop(app))
     spawn(learning.reminder_loop(app))
     spawn(learning.quiz_loop(app))
+    spawn(learning.watch_loop(app))
+    spawn(learning.set_menu(app))
 
 
 def main():
@@ -372,6 +374,7 @@ def main():
     app.add_handler(CommandHandler("quiz_now", learning.cmd_quiz_now))
     app.add_handler(CallbackQueryHandler(learning.on_announce_pick, pattern=r"^an:\d+$"))
     app.add_handler(CallbackQueryHandler(learning.on_announce_confirm, pattern=r"^an(send|cancel)$"))
+    app.add_handler(CallbackQueryHandler(learning.on_proposal_button, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(learning.on_ack_button, pattern=r"^ack:"))
     app.add_handler(CallbackQueryHandler(learning.on_quiz_button, pattern=r"^qz:"))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))

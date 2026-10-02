@@ -495,3 +495,190 @@ async def quiz_loop(app):
         except Exception as e:
             log.warning("Цикл тестов: %s", e)
         await asyncio.sleep(300)
+
+
+# ---------- автоматическое предложение рассылки при изменении документа ----------
+
+BASE_FILE = os.path.join(config.BASE_DIR, "baselines.json")
+SETTLE = timedelta(minutes=60)      # документ должен «отстояться» час без новых правок
+MIN_CHANGED_WORDS = 3               # опечатки и мелкая правка не повод для рассылки
+
+SUMMARY_SYSTEM = (
+    "Ты помогаешь владельцу гостиницы. Даны удалённые и добавленные строки документа после правки. "
+    "Опиши для сотрудников в 1–2 коротких предложениях, что изменилось по сути (какие правила, числа, сроки, "
+    "обязанности). Только факты из изменений, без вступлений, без оценок и без слов «документ изменён».")
+
+
+def _load_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _hash(text):
+    import hashlib
+    return hashlib.sha1(_flat(text).encode()).hexdigest()
+
+
+def changed_words(old, new):
+    import difflib
+    a, b = _flat(old).split(), _flat(new).split()
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal")
+
+
+def diff_excerpt(old, new, limit=4000):
+    import difflib
+    lines = difflib.unified_diff([l.strip() for l in old.splitlines() if l.strip()],
+                                 [l.strip() for l in new.splitlines() if l.strip()], lineterm="", n=0)
+    keep = [l for l in lines if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+    return "\n".join(keep)[:limit]
+
+
+async def summarize_change(kb, old, new):
+    try:
+        out = await kb.provider.chat(config.ANSWER_MODEL, [
+            {"role": "system", "content": SUMMARY_SYSTEM},
+            {"role": "user", "content": diff_excerpt(old, new)}], temperature=0.2, max_tokens=300, timeout=60)
+        return out.strip()[:400]
+    except Exception as e:
+        log.warning("Не удалось описать изменение: %s", e)
+        return ""
+
+
+async def watch_pass(app, now=None):
+    """Раз в 10 минут: если документ изменился и час не правился — предлагает владельцу разослать, с готовым описанием."""
+    now = now or datetime.now(TZ)
+    kb = app.bot_data["kb"]
+    base = _load_json(BASE_FILE, {})
+    st = load_state()
+    pending = st.setdefault("pending", {})
+    dirty_base = dirty_state = False
+    for d in await kb.catalog():
+        if d.kind != "doc":
+            continue
+        try:
+            text = await kb.text(d)
+        except Exception:
+            continue
+        if not text:
+            continue
+        h = _hash(text)
+        b = base.get(d.file_id)
+        if not b:
+            base[d.file_id] = {"hash": h, "text": text}
+            dirty_base = True
+            continue
+        if h == b["hash"]:
+            if pending.pop(d.file_id, None):
+                dirty_state = True
+            continue
+        p = pending.get(d.file_id)
+        if not p or p["hash"] != h:
+            pending[d.file_id] = {"hash": h, "since": now.isoformat(timespec="seconds")}
+            dirty_state = True
+            continue
+        if now - datetime.fromisoformat(p["since"]) < SETTLE:
+            continue
+        # документ отстоялся: решаем, предлагать ли рассылку
+        pending.pop(d.file_id, None)
+        dirty_state = True
+        old = b["text"]
+        base[d.file_id] = {"hash": h, "text": text}
+        dirty_base = True
+        if changed_words(old, text) < MIN_CHANGED_WORDS or not config.OWNER_TELEGRAM_ID or not config.ACK_DB_ID:
+            continue
+        change = await summarize_change(kb, old, text)
+        pid = uuid.uuid4().hex[:6]
+        st.setdefault("proposals", {})[pid] = {"title": d.title, "file_id": d.file_id, "change": change}
+        dirty_state = True
+        draft = change or "(описание составить не удалось, напишите его сами)"
+        rows = []
+        if change:
+            rows.append([InlineKeyboardButton("✅ Разослать", callback_data=f"pr:{pid}:ok")])
+        rows.append([InlineKeyboardButton("✏️ Своё описание", callback_data=f"pr:{pid}:edit"),
+                     InlineKeyboardButton("Не нужно", callback_data=f"pr:{pid}:no")])
+        kbd = InlineKeyboardMarkup(rows)
+        try:
+            await app.bot.send_message(
+                config.OWNER_TELEGRAM_ID,
+                f"Документ «{d.title}» изменился. Разослать сотрудникам с кнопкой «Ознакомился»?\n\n"
+                f"Что изменилось (черновик):\n{draft}", reply_markup=kbd)
+        except Exception:
+            log.exception("не удалось предложить рассылку")
+    if dirty_base:
+        _save_json(BASE_FILE, base)
+    if dirty_state:
+        save_state(st)
+    # state мог быть переписан внутри (proposals) — save_state выше сохраняет актуальный объект
+
+
+async def on_proposal_button(update, ctx):
+    q = update.callback_query
+    if q.from_user.id != config.OWNER_TELEGRAM_ID:
+        await q.answer("Это решает владелец.", show_alert=True)
+        return
+    try:
+        _, pid, action = q.data.split(":")
+    except ValueError:
+        await q.answer()
+        return
+    st = load_state()
+    prop = st.get("proposals", {}).get(pid)
+    if not prop:
+        await q.answer("Предложение уже обработано.", show_alert=True)
+        return
+    await q.answer()
+    if action == "no":
+        st["proposals"].pop(pid, None)
+        save_state(st)
+        await q.edit_message_text(f"«{prop['title']}»: рассылка не нужна.")
+    elif action == "edit":
+        st["proposals"].pop(pid, None)
+        save_state(st)
+        ctx.application.bot_data["an_flow"] = {"title": prop["title"], "file_id": prop["file_id"]}
+        await q.edit_message_text(f"«{prop['title']}»: напишите одним-двумя предложениями, что изменилось. Для отмены — /cancel.")
+    elif action == "ok":
+        st["proposals"].pop(pid, None)
+        save_state(st)
+        await q.edit_message_text("Отправляю…")
+        sent, failed = await send_announcement(ctx.application, prop["title"], prop["file_id"], prop["change"])
+        text = f"«{prop['title']}»: отправлено {sent}."
+        if failed:
+            text += " Не доставлено: " + ", ".join(failed) + " (пусть откроют бота и нажмут «Старт»)."
+        await q.edit_message_text(text)
+
+
+async def watch_loop(app):
+    await asyncio.sleep(420)   # дать прогреть кэш документов
+    while True:
+        if config.ACK_DB_ID:
+            try:
+                await watch_pass(app)
+            except Exception as e:
+                log.warning("Слежение за изменениями документов: %s", e)
+        await asyncio.sleep(600)
+
+
+async def set_menu(app):
+    """Меню команд: владелец видит /announce и /quiz_now в списке «/», набирать не нужно."""
+    try:
+        from telegram import BotCommand, BotCommandScopeChat
+        await app.bot.set_my_commands([BotCommand("start", "Начало"), BotCommand("help", "Что я умею")])
+        if config.OWNER_TELEGRAM_ID:
+            await app.bot.set_my_commands(
+                [BotCommand("start", "Начало"), BotCommand("help", "Что я умею"),
+                 BotCommand("announce", "Разослать об изменении документа"),
+                 BotCommand("quiz_now", "Пробный мини-тест (всем: /quiz_now all)")],
+                scope=BotCommandScopeChat(config.OWNER_TELEGRAM_ID))
+    except Exception as e:
+        log.warning("Меню команд не установлено: %s", e)

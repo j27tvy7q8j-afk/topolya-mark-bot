@@ -9,3 +9,4 @@ seen_docs.json
 snapshots/
 quiz_state.json
 learning_state.json
+baselines.json
