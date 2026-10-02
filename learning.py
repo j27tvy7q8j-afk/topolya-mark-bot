@@ -1,5 +1,6 @@
 """Ознакомление сотрудников с документами (кнопка «Ознакомился») и мини-тесты по документам.
-Всё запускает владелец командами /announce и /quiz_now; тест раз в неделю включается QUIZ_WEEKLY=1."""
+Владелец всё делает кнопками: «📋 Меню» внизу чата (команды /menu, /announce, /quiz_now остаются запасными).
+Тест раз в неделю включён по умолчанию (QUIZ_WEEKLY=0 выключает)."""
 import asyncio
 import json
 import logging
@@ -53,6 +54,52 @@ def _short_name(name):
     return re.sub(r"\s*\(.*?\)", "", name or "").strip()
 
 
+MENU_BTN, HELP_BTN = "📋 Меню", "ℹ️ Помощь"
+
+
+def owner_keyboard():
+    from telegram import ReplyKeyboardMarkup
+    return ReplyKeyboardMarkup([[MENU_BTN, HELP_BTN]], resize_keyboard=True, is_persistent=True)
+
+
+def staff_keyboard():
+    from telegram import ReplyKeyboardMarkup
+    return ReplyKeyboardMarkup([[HELP_BTN]], resize_keyboard=True, is_persistent=True)
+
+
+def keyboard_for(tg_id):
+    return owner_keyboard() if tg_id == config.OWNER_TELEGRAM_ID else staff_keyboard()
+
+
+CANCEL_ROW = [InlineKeyboardButton("Отмена", callback_data="ancancel")]
+
+
+async def show_menu(app):
+    kbd = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📣 Разослать сотрудникам об изменении документа", callback_data="mn:ann")],
+        [InlineKeyboardButton("📝 Мини-тест по документу (сначала вам)", callback_data="mn:quiz")]])
+    await app.bot.send_message(config.OWNER_TELEGRAM_ID, "Что сделать?", reply_markup=kbd)
+
+
+async def cmd_menu(update, ctx):
+    if _is_owner(update):
+        await show_menu(ctx.application)
+
+
+async def on_menu_button(update, ctx):
+    q = update.callback_query
+    if q.from_user.id != config.OWNER_TELEGRAM_ID:
+        await q.answer("Это меню владельца.", show_alert=True)
+        return
+    await q.answer()
+    if q.data == "mn:ann":
+        await q.edit_message_text("Выберите документ ниже.")
+        await _announce_list(ctx.application)
+    elif q.data == "mn:quiz":
+        await q.edit_message_text("Составляю мини-тест по документу, около минуты…")
+        await start_trial(ctx.application)
+
+
 def _flat(s):
     return re.sub(r"[^\w]+", " ", (s or "").lower().replace("ё", "е")).strip()
 
@@ -70,18 +117,21 @@ def ack_markup(row_id):
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Ознакомился", callback_data="ack:" + row_id)]])
 
 
-async def cmd_announce(update, ctx):
-    if not _is_owner(update):
-        return
+async def _announce_list(app):
     if not config.ACK_DB_ID:
-        await update.effective_message.reply_text("Рассылка не настроена: в .env нет ACK_DB_ID.")
+        await app.bot.send_message(config.OWNER_TELEGRAM_ID, "Рассылка пока не настроена. Сообщите разработчику.")
         return
-    kb = ctx.application.bot_data["kb"]
-    docs = await kb.catalog()
-    ctx.application.bot_data["an_docs"] = [(d.title, d.file_id) for d in docs]
+    docs = await app.bot_data["kb"].catalog()
+    app.bot_data["an_docs"] = [(d.title, d.file_id) for d in docs]
     rows = [[InlineKeyboardButton(d.title[:60], callback_data=f"an:{i}")] for i, d in enumerate(docs)]
-    await update.effective_message.reply_text("О каком документе разослать? (только документы, подключённые к боту)",
-                                              reply_markup=InlineKeyboardMarkup(rows))
+    await app.bot.send_message(config.OWNER_TELEGRAM_ID,
+                               "О каком документе сообщить сотрудникам? Выберите из списка (только документы, подключённые к боту).",
+                               reply_markup=InlineKeyboardMarkup(rows + [CANCEL_ROW]))
+
+
+async def cmd_announce(update, ctx):
+    if _is_owner(update):
+        await _announce_list(ctx.application)
 
 
 async def cmd_cancel(update, ctx):
@@ -99,16 +149,19 @@ async def on_announce_pick(update, ctx):
     try:
         title, fid = docs[int(q.data.split(":", 1)[1])]
     except Exception:
-        await q.answer("Список устарел, вызовите /announce ещё раз.", show_alert=True)
+        await q.answer("Список устарел: нажмите «📋 Меню» и выберите рассылку заново.", show_alert=True)
         return
     ctx.application.bot_data["an_flow"] = {"title": title, "file_id": fid}
     await q.answer()
     await q.edit_message_text(f"Документ: «{title}».\nНапишите одним-двумя предложениями, что нового или что "
-                              "изменилось: это увидят сотрудники. Для отмены — /cancel.")
+                              "изменилось: это увидят сотрудники.", reply_markup=InlineKeyboardMarkup([CANCEL_ROW]))
 
 
 async def owner_flow_text(update, ctx):
-    """Перехватывает текст владельца, когда бот ждёт описание изменений. True — сообщение обработано."""
+    """Кнопка «📋 Меню» и текст владельца, когда бот ждёт описание изменений. True — сообщение обработано."""
+    if _is_owner(update) and (update.effective_message.text or "").strip() == MENU_BTN:
+        await show_menu(ctx.application)
+        return True
     flow = ctx.application.bot_data.get("an_flow")
     if not flow or "change" in flow or not _is_owner(update):
         return False
@@ -116,7 +169,8 @@ async def owner_flow_text(update, ctx):
     try:
         staff = await notion_api.active_staff()
     except Exception as e:
-        await update.effective_message.reply_text(f"Не удалось прочитать список сотрудников в Notion: {e}")
+        log.warning("Список сотрудников не получен: %s", e)
+        await update.effective_message.reply_text("Не удалось получить список сотрудников. Попробуйте ещё раз через минуту.")
         return True
     flow["n"] = len(staff)
     kbd = InlineKeyboardMarkup([[InlineKeyboardButton(f"Отправить ({len(staff)} чел.)", callback_data="ansend"),
@@ -156,14 +210,16 @@ async def on_announce_confirm(update, ctx):
     if q.from_user.id != config.OWNER_TELEGRAM_ID:
         await q.answer("Это делает владелец.", show_alert=True)
         return
+    if q.data == "ancancel":
+        ctx.application.bot_data.pop("an_flow", None)
+        await q.answer()
+        await q.edit_message_text("Хорошо, отменено.")
+        return
     flow = ctx.application.bot_data.pop("an_flow", None)
     if not flow or "change" not in flow:
         await q.answer("Рассылка уже обработана или отменена.", show_alert=True)
         return
     await q.answer()
-    if q.data == "ancancel":
-        await q.edit_message_text("Рассылка отменена.")
-        return
     await q.edit_message_text("Отправляю…")
     sent, failed = await send_announcement(ctx.application, flow["title"], flow["file_id"], flow["change"])
     text = f"Готово: отправлено {sent}."
@@ -322,54 +378,114 @@ def q_message(quiz, qid, i):
     return text, kbd
 
 
-async def send_quiz(app, kb, targets):
-    """targets: [{tg_id, name}]. Возвращает (qid, doc, отправлено, [не доставлено])."""
-    st = load_state()
-    doc, qs = await build_quiz(kb, st)
-    qid = uuid.uuid4().hex[:6]
-    quiz = {"doc": doc.title, "created": datetime.now(TZ).isoformat(timespec="seconds"),
-            "questions": qs, "players": {}, "digest": False, "nudged": False}
+async def _deliver(app, qid, quiz, targets):
+    """Отправляет тест тем из targets, кто его ещё не получил. Возвращает (отправлено, [не доставлено])."""
     sent, failed = 0, []
     for t in targets:
+        key = str(t["tg_id"])
+        if key in quiz["players"]:
+            continue
         try:
             await app.bot.send_message(
-                t["tg_id"], f"📝 Мини-тест по документу «{doc.title}»: {len(qs)} вопроса, 2 минуты. Отвечайте кнопками. "
-                "Результаты видит владелец; цель не оценить вас, а понять, какие места в правилах непонятны.")
-            quiz["players"][str(t["tg_id"])] = {"name": t["name"], "answers": {}}
+                t["tg_id"], f"📝 Мини-тест по документу «{quiz['doc']}»: {len(quiz['questions'])} вопроса, 2 минуты. "
+                "Отвечайте кнопками. Результаты видит владелец; цель не оценить вас, а понять, какие места в правилах непонятны.")
+            quiz["players"][key] = {"name": t["name"], "answers": {}}
             text, kbd = q_message(quiz, qid, 0)
             await app.bot.send_message(t["tg_id"], text, reply_markup=kbd)
             sent += 1
         except Exception as e:
             log.warning("Тест не дошёл до %s: %s", t["tg_id"], e)
-            quiz["players"].pop(str(t["tg_id"]), None)
-            failed.append(_short_name(t["name"]) or str(t["tg_id"]))
+            quiz["players"].pop(key, None)
+            failed.append(_short_name(t["name"]) or key)
         await asyncio.sleep(0.2)
+    return sent, failed
+
+
+async def send_quiz(app, kb, targets, trial=False):
+    """targets: [{tg_id, name}]. Возвращает (qid, doc, отправлено, [не доставлено])."""
+    st = load_state()
+    doc, qs = await build_quiz(kb, st)
+    qid = uuid.uuid4().hex[:6]
+    quiz = {"doc": doc.title, "created": datetime.now(TZ).isoformat(timespec="seconds"),
+            "questions": qs, "players": {}, "digest": False, "nudged": False, "trial": trial}
+    sent, failed = await _deliver(app, qid, quiz, targets)
     st["quizzes"][qid] = quiz
     save_state(st)
     return qid, doc, sent, failed
 
 
+async def start_trial(app):
+    """Пробный тест только владельцу; после прохождения бот предложит отправить его всем."""
+    owner = config.OWNER_TELEGRAM_ID
+    try:
+        qid, doc, sent, failed = await send_quiz(app, app.bot_data["kb"], [{"tg_id": owner, "name": "Владелец"}], trial=True)
+        await app.bot.send_message(owner, f"Тест по документу «{doc.title}» отправлен вам для проверки. Пройдите его, "
+                                          "и я предложу отправить такой же тест сотрудникам.")
+    except Exception as e:
+        log.warning("Пробный тест не составлен: %s", e)
+        try:
+            await app.bot.send_message(owner, "Не получилось составить тест. Попробуйте ещё раз через несколько минут "
+                                              "(кнопка «📋 Меню»). Если повторится, сообщите разработчику.")
+        except Exception:
+            pass
+
+
 async def cmd_quiz_now(update, ctx):
     if not _is_owner(update):
         return
-    kb = ctx.application.bot_data["kb"]
-    everyone = bool(ctx.args) and ctx.args[0].lower() in ("all", "все")
-    try:
-        if everyone:
+    app = ctx.application
+    if ctx.args and ctx.args[0].lower() in ("all", "все"):     # запасной путь для разработчика
+        try:
             targets = [{"tg_id": s["tg_id"], "name": s["name"]} for s in await notion_api.active_staff()]
-        else:
-            targets = [{"tg_id": config.OWNER_TELEGRAM_ID, "name": "Владелец"}]
-        await update.effective_message.reply_text("Составляю вопросы по документу, около минуты…")
-        qid, doc, sent, failed = await send_quiz(ctx.application, kb, targets)
-    except Exception as e:
-        await update.effective_message.reply_text(f"Тест не отправлен: {e}")
+            qid, doc, sent, failed = await send_quiz(app, app.bot_data["kb"], targets)
+        except Exception as e:
+            log.warning("Тест всем не отправлен: %s", e)
+            await update.effective_message.reply_text("Не получилось отправить тест. Попробуйте позже.")
+            return
+        await update.effective_message.reply_text(f"Тест по «{doc.title}» отправлен: {sent}.")
         return
-    msg = f"Тест по «{doc.title}» отправлен: {sent}."
+    await update.effective_message.reply_text("Составляю мини-тест по документу, около минуты…")
+    await start_trial(app)
+
+
+async def on_quiz_all(update, ctx):
+    """«Отправить всем» / «Не сейчас» после пробного теста."""
+    q = update.callback_query
+    if q.from_user.id != config.OWNER_TELEGRAM_ID:
+        await q.answer("Это решает владелец.", show_alert=True)
+        return
+    try:
+        _, action, qid = q.data.split(":")
+    except ValueError:
+        await q.answer()
+        return
+    st = load_state()
+    quiz = st["quizzes"].get(qid)
+    if not quiz:
+        await q.answer("Этот тест уже закрыт.", show_alert=True)
+        return
+    await q.answer()
+    if action == "no":
+        await q.edit_message_text("Хорошо, сотрудникам не отправляю.")
+        return
+    await q.edit_message_text("Отправляю сотрудникам…")
+    try:
+        staff = await notion_api.active_staff()
+        sent, failed = await _deliver(ctx.application, qid, quiz,
+                                      [{"tg_id": x["tg_id"], "name": x["name"]} for x in staff])
+    except Exception as e:
+        log.warning("Тест сотрудникам не отправлен: %s", e)
+        await q.edit_message_text("Не получилось отправить тест. Попробуйте позже через «📋 Меню».")
+        return
+    quiz.update(trial=False, created=datetime.now(TZ).isoformat(timespec="seconds"), nudged=False, digest=False)
+    st = load_state()
+    st["quizzes"][qid] = quiz
+    save_state(st)
+    text = f"Готово: тест отправлен {sent} сотрудникам."
     if failed:
-        msg += " Не доставлено: " + ", ".join(failed) + "."
-    if not everyone:
-        msg += " Это был пробный тест только вам. Всем: /quiz_now all"
-    await update.effective_message.reply_text(msg)
+        text += " Не получили: " + ", ".join(failed) + " (пусть откроют бота и нажмут «Старт»)."
+    text += " Через 2 дня пришлю итоги."
+    await q.edit_message_text(text)
 
 
 async def on_quiz_button(update, ctx):
@@ -412,6 +528,13 @@ async def on_quiz_button(update, ctx):
     else:
         score = sum(1 for k, a in player["answers"].items() if quiz["questions"][int(k)]["correct"] == a)
         await ctx.application.bot.send_message(chat_id, f"Готово: {score} из {len(quiz['questions'])}. Спасибо!")
+        if quiz.get("trial") and q.from_user.id == config.OWNER_TELEGRAM_ID and not quiz.get("offered"):
+            quiz["offered"] = True
+            save_state(st)
+            await ctx.application.bot.send_message(
+                chat_id, "Это был пробный тест, он пришёл только вам. Отправить такой же тест всем сотрудникам?",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Отправить всем", callback_data=f"qa:all:{qid}"),
+                                                    InlineKeyboardButton("Не сейчас", callback_data=f"qa:no:{qid}")]]))
 
 
 def digest_text(quiz):
@@ -458,7 +581,9 @@ async def quiz_pass(app, now=None):
             log.warning("Еженедельный тест не отправлен: %s", e)
             if config.OWNER_TELEGRAM_ID:
                 try:
-                    await app.bot.send_message(config.OWNER_TELEGRAM_ID, f"⚠️ Еженедельный тест не отправлен: {e}")
+                    await app.bot.send_message(config.OWNER_TELEGRAM_ID,
+                        "⚠️ Еженедельный тест не отправился: не получилось составить вопросы. Бот попробует ещё раз; "
+                        "если не выйдет, отправьте тест вручную через «📋 Меню».")
                 except Exception:
                     pass
             st = load_state()
@@ -671,7 +796,8 @@ async def on_proposal_button(update, ctx):
         st["proposals"].pop(pid, None)
         save_state(st)
         ctx.application.bot_data["an_flow"] = {"title": prop["title"], "file_id": prop["file_id"]}
-        await q.edit_message_text(f"«{prop['title']}»: напишите одним-двумя предложениями, что изменилось. Для отмены — /cancel.")
+        await q.edit_message_text(f"«{prop['title']}»: напишите одним-двумя предложениями, что изменилось.",
+                                reply_markup=InlineKeyboardMarkup([CANCEL_ROW]))
     elif action == "ok":
         st["proposals"].pop(pid, None)
         save_state(st)
@@ -695,16 +821,14 @@ async def watch_loop(app):
 
 
 async def set_menu(app):
-    """Меню команд: владелец видит /announce и /quiz_now в списке «/», набирать не нужно."""
+    """Список команд у кнопки «/»: только понятные пункты, без служебных команд."""
     try:
         from telegram import BotCommand, BotCommandScopeChat
-        await app.bot.set_my_commands([BotCommand("start", "Начало"), BotCommand("help", "Что я умею")])
+        base = [BotCommand("start", "Начало"), BotCommand("help", "Что я умею")]
+        await app.bot.set_my_commands(base)
         if config.OWNER_TELEGRAM_ID:
-            await app.bot.set_my_commands(
-                [BotCommand("start", "Начало"), BotCommand("help", "Что я умею"),
-                 BotCommand("announce", "Разослать об изменении документа"),
-                 BotCommand("quiz_now", "Пробный мини-тест (всем: /quiz_now all)")],
-                scope=BotCommandScopeChat(config.OWNER_TELEGRAM_ID))
+            await app.bot.set_my_commands(base + [BotCommand("menu", "Меню: рассылка и тесты")],
+                                          scope=BotCommandScopeChat(config.OWNER_TELEGRAM_ID))
     except Exception as e:
         log.warning("Меню команд не установлено: %s", e)
 
@@ -726,34 +850,25 @@ async def startup_check(app):
         try:
             from bot import get_notifier
             await get_notifier(app)("learning-db",
-                "рассылки и тесты не работают: у интеграции «Марк» нет доступа к базам: " + ", ".join(bad) +
-                ". В Notion откройте «Служебные базы» → «···» → «Подключения» и подключите «Марк» к этим базам.")
+                "рассылки и тесты пока не работают: у бота нет доступа к таблицам в Notion (" + ", ".join(bad) + "). "
+                "Что сделать: откройте в Notion страницу «Служебные базы», нажмите «···» → «Подключения» и подключите «Марк». "
+                "Или передайте это разработчику.")
         except Exception:
             log.exception("не удалось отправить тревогу о базах")
-    elif not st.get("ready_notified"):
+        return
+    if not st.get("ready_notified"):
         try:
             await app.bot.send_message(
                 config.OWNER_TELEGRAM_ID,
-                "✅ Рассылки и мини-тесты готовы: базы доступны. Рассылка: /announce в меню (бот также сам предложит при "
-                "изменении или новом документе). Пробный тест: /quiz_now. Автотест по понедельникам в 11:00 (МСК) включён.")
+                "✅ Рассылки и мини-тесты готовы. Внизу появилась кнопка «📋 Меню»: через неё можно сообщить сотрудникам "
+                "об изменении документа или отправить мини-тест. Бот сам предложит рассылку, когда документ изменится "
+                "или появится новый. Мини-тест сотрудникам уходит автоматически по понедельникам в 11:00.",
+                reply_markup=owner_keyboard())
             st["ready_notified"] = True
             save_state(st)
         except Exception:
             log.exception("не удалось отправить уведомление о готовности")
-    if not bad and not st.get("trial_sent"):
-        # один раз: пробный тест только владельцу, чтобы он увидел вопросы до первого автотеста
-        st["trial_sent"] = True
+    if not st.get("trial_sent"):
+        st["trial_sent"] = True      # один раз: пробный тест только владельцу, чтобы он увидел вопросы
         save_state(st)
-        try:
-            qid, doc, sent, failed = await send_quiz(app, app.bot_data["kb"],
-                                                     [{"tg_id": config.OWNER_TELEGRAM_ID, "name": "Владелец"}])
-            await app.bot.send_message(config.OWNER_TELEGRAM_ID,
-                f"Выше пробный мини-тест по «{doc.title}», он пришёл только вам. Пройдите его: так вы увидите, как "
-                "выглядят вопросы. Если что-то не так, напишите мне в чат проекта.")
-        except Exception as e:
-            log.warning("Пробный тест не составлен: %s", e)
-            try:
-                await app.bot.send_message(config.OWNER_TELEGRAM_ID,
-                    f"⚠️ Пробный мини-тест не составился: {e}. Попробуйте вручную через меню: /quiz_now.")
-            except Exception:
-                pass
+        await start_trial(app)

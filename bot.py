@@ -31,7 +31,7 @@ START_TEXT = (
     "интеллект, не человек. Отвечаю на вопросы по правилам, тарифам, инструкциям и чек-листам — "
     "только по документам отеля. Если ответа в документах нет, так и скажу.\n\n"
     "Важно: ваши вопросы и мои ответы записываются в журнал, который видит владелец.\n\n"
-    "Просто напишите вопрос. Список тем — /help.")
+    "Просто напишите вопрос обычными словами. Список тем — кнопка «ℹ️ Помощь» внизу.")
 
 HELP_TEXT = (
     "Можно спрашивать обычными словами. Темы:\n"
@@ -140,7 +140,9 @@ async def check_access(update: Update):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     staff = await check_access(update)
     if staff:
-        await say(update, START_TEXT.format(name=staff["name"] or update.effective_user.first_name or "коллега"))
+        name = staff["name"] or update.effective_user.first_name or "коллега"
+        await update.effective_message.reply_text(START_TEXT.format(name=name),
+                                                  reply_markup=learning.keyboard_for(update.effective_user.id))
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -176,6 +178,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     staff = await check_access(update)
     if not staff:
         return
+    if question == learning.HELP_BTN:
+        await say(update, HELP_TEXT.format(bot=config.BOT_USERNAME))
+        return
     if GREET_RE.match(question):
         await say(update, "Здравствуйте! Я Марк, ИИ-помощник отеля. Задайте вопрос по правилам, тарифам или инструкциям.")
         return
@@ -190,7 +195,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ans = await kb.answer(question, history)
         except Exception as e:
             log.exception("Ответ не получен")
-            await get_notifier(ctx.application)("answer", f"не удалось ответить на вопрос ({e})")
+            await get_notifier(ctx.application)("answer", "бот не смог ответить на вопрос сотрудника (временный сбой нейросети или связи). Сотруднику предложено повторить через минуту. Если такое повторяется, сообщите разработчику.")
             await say(update, TEMP_ERR)
             return
         memory.add(user.id, question, ans.text)
@@ -200,7 +205,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 WELCOME = ("Здравствуйте{name}! Вас добавили, теперь можете задавать мне вопросы по документам и правилам "
-           "отеля. Я ИИ-помощник и отвечаю только по документам. Нужна помощь — напишите /help")
+           "отеля. Я ИИ-помощник и отвечаю только по документам. Нужна помощь — нажмите «ℹ️ Помощь» внизу")
 
 
 async def welcome_loop(app):
@@ -214,7 +219,8 @@ async def welcome_loop(app):
                 last_try[st["tg_id"]] = time.time()
                 short = re.sub(r"\s*\(.*?\)", "", st["name"]).strip()
                 try:
-                    await app.bot.send_message(st["tg_id"], WELCOME.format(name=", " + short if short else ""))
+                    await app.bot.send_message(st["tg_id"], WELCOME.format(name=", " + short if short else ""),
+                                               reply_markup=learning.keyboard_for(st["tg_id"]))
                 except Exception as e:
                     log.warning("Приветствие не доставлено %s: %s", st["tg_id"], e)
                     await get_notifier(app)(f"welcome-{st['tg_id']}",
@@ -272,13 +278,13 @@ async def on_connect_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await asyncio.to_thread(drive_reader.read_document, fid)
         except Exception as e:
             log.warning("нет доступа к новому документу %s: %s", c["title"], e)
-            await q.edit_message_text(f"«{c['title']}»: у бота нет доступа к файлу. Откройте его для сервисного аккаунта mark-bot (читатель) и нажмите кнопку ещё раз.", reply_markup=q.message.reply_markup)
+            await q.edit_message_text(f"«{c['title']}»: бот пока не может открыть этот файл. Откройте доступ к файлу для адреса mark-bot@nifty-acolyte-495212-j5.iam.gserviceaccount.com (роль «Читатель») и нажмите кнопку ещё раз.", reply_markup=q.message.reply_markup)
             return
     try:
         await notion_api.enable_for_bot(c["page_id"], "владельца")
     except Exception as e:
         log.warning("не удалось подключить документ: %s", e)
-        await q.edit_message_text(f"«{c['title']}»: не удалось поставить галочку в Notion ({e}). Отметьте «Для бота» вручную.")
+        await q.edit_message_text(f"«{c['title']}»: не удалось отметить документ в Notion. Поставьте галочку «Для бота» в карточке документа вручную.")
         return
     await q.edit_message_text(f"Готово: «{c['title']}» подключён. Бот увидит его в течение 15 минут.")
 
@@ -370,11 +376,14 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CallbackQueryHandler(on_connect_button, pattern=r"^(add|skip):"))
+    app.add_handler(CommandHandler("menu", learning.cmd_menu))
     app.add_handler(CommandHandler("announce", learning.cmd_announce))
     app.add_handler(CommandHandler("cancel", learning.cmd_cancel))
     app.add_handler(CommandHandler("quiz_now", learning.cmd_quiz_now))
     app.add_handler(CallbackQueryHandler(learning.on_announce_pick, pattern=r"^an:\d+$"))
     app.add_handler(CallbackQueryHandler(learning.on_announce_confirm, pattern=r"^an(send|cancel)$"))
+    app.add_handler(CallbackQueryHandler(learning.on_menu_button, pattern=r"^mn:"))
+    app.add_handler(CallbackQueryHandler(learning.on_quiz_all, pattern=r"^qa:"))
     app.add_handler(CallbackQueryHandler(learning.on_proposal_button, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(learning.on_ack_button, pattern=r"^ack:"))
     app.add_handler(CallbackQueryHandler(learning.on_quiz_button, pattern=r"^qz:"))
