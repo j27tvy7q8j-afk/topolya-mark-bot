@@ -555,11 +555,41 @@ async def summarize_change(kb, old, new):
         return ""
 
 
+async def _propose(app, st, title, fid, change, header):
+    """Предложение владельцу разослать документ: черновик описания + кнопки."""
+    pid = uuid.uuid4().hex[:6]
+    st.setdefault("proposals", {})[pid] = {"title": title, "file_id": fid, "change": change}
+    draft = change or "(описание составить не удалось, напишите его сами)"
+    rows = []
+    if change:
+        rows.append([InlineKeyboardButton("✅ Разослать", callback_data=f"pr:{pid}:ok")])
+    rows.append([InlineKeyboardButton("✏️ Своё описание", callback_data=f"pr:{pid}:edit"),
+                 InlineKeyboardButton("Не нужно", callback_data=f"pr:{pid}:no")])
+    try:
+        await app.bot.send_message(config.OWNER_TELEGRAM_ID, f"{header}\n\nЧто увидят сотрудники (черновик):\n{draft}",
+                                   reply_markup=InlineKeyboardMarkup(rows))
+    except Exception:
+        log.exception("не удалось предложить рассылку")
+
+
+async def describe_doc(kb, text):
+    try:
+        out = await kb.provider.chat(config.ANSWER_MODEL, [
+            {"role": "system", "content": "Опиши в одном-двух коротких предложениях, о чём этот документ гостиницы и "
+             "для кого он (какие правила или порядок в нём). Только по тексту, без вступлений."},
+            {"role": "user", "content": text[:6000]}], temperature=0.2, max_tokens=250, timeout=60)
+        return out.strip()[:400]
+    except Exception as e:
+        log.warning("Не удалось описать документ: %s", e)
+        return ""
+
+
 async def watch_pass(app, now=None):
     """Раз в 10 минут: если документ изменился и час не правился — предлагает владельцу разослать, с готовым описанием."""
     now = now or datetime.now(TZ)
     kb = app.bot_data["kb"]
     base = _load_json(BASE_FILE, {})
+    first_run = not base            # самый первый проход только запоминает текущие версии
     st = load_state()
     pending = st.setdefault("pending", {})
     dirty_base = dirty_state = False
@@ -569,14 +599,25 @@ async def watch_pass(app, now=None):
         try:
             text = await kb.text(d)
         except Exception:
-            continue
+            text = ""
         if not text:
+            if first_run and d.file_id not in base:    # не прочитался при первом проходе: запомнить, что он уже был
+                base[d.file_id] = {"hash": "", "text": ""}
+                dirty_base = True
             continue
         h = _hash(text)
         b = base.get(d.file_id)
-        if not b:
+        if b and not b["hash"]:                         # раньше не читался: просто считаем текущую версию исходной
             base[d.file_id] = {"hash": h, "text": text}
             dirty_base = True
+            continue
+        if not b:
+            base[d.file_id] = {"hash": h, "text": text}
+            dirty_base = dirty_state = True
+            if not first_run and config.OWNER_TELEGRAM_ID and config.ACK_DB_ID:
+                # документ появился в списке бота: предлагаем ознакомить сотрудников
+                await _propose(app, st, d.title, d.file_id, await describe_doc(kb, text),
+                               f"К боту подключён новый документ «{d.title}». Разослать сотрудникам, чтобы ознакомились?")
             continue
         if h == b["hash"]:
             if pending.pop(d.file_id, None):
@@ -597,24 +638,8 @@ async def watch_pass(app, now=None):
         dirty_base = True
         if changed_words(old, text) < MIN_CHANGED_WORDS or not config.OWNER_TELEGRAM_ID or not config.ACK_DB_ID:
             continue
-        change = await summarize_change(kb, old, text)
-        pid = uuid.uuid4().hex[:6]
-        st.setdefault("proposals", {})[pid] = {"title": d.title, "file_id": d.file_id, "change": change}
-        dirty_state = True
-        draft = change or "(описание составить не удалось, напишите его сами)"
-        rows = []
-        if change:
-            rows.append([InlineKeyboardButton("✅ Разослать", callback_data=f"pr:{pid}:ok")])
-        rows.append([InlineKeyboardButton("✏️ Своё описание", callback_data=f"pr:{pid}:edit"),
-                     InlineKeyboardButton("Не нужно", callback_data=f"pr:{pid}:no")])
-        kbd = InlineKeyboardMarkup(rows)
-        try:
-            await app.bot.send_message(
-                config.OWNER_TELEGRAM_ID,
-                f"Документ «{d.title}» изменился. Разослать сотрудникам с кнопкой «Ознакомился»?\n\n"
-                f"Что изменилось (черновик):\n{draft}", reply_markup=kbd)
-        except Exception:
-            log.exception("не удалось предложить рассылку")
+        await _propose(app, st, d.title, d.file_id, await summarize_change(kb, old, text),
+                       f"Документ «{d.title}» изменился. Разослать сотрудникам с кнопкой «Ознакомился»?")
     if dirty_base:
         _save_json(BASE_FILE, base)
     if dirty_state:
