@@ -236,3 +236,49 @@ async def quiz_log(question, doc, name, tg_id, chosen, correct_text, ok, test_id
 async def ack_archive(page_id):
     """Убирает строку (рассылка не доставлена)."""
     await _req("PATCH", f"/pages/{page_id}", {"archived": True})
+
+
+# ---------- Проверка ответов владельцем ----------
+
+REVIEW_REASONS = ["Нет в документе или устарело", "Юридический вопрос", "Выбран не тот фрагмент", "Вопрос про цену"]
+
+
+def _review_filter():
+    return {"and": [{"property": "Проверка", "select": {"is_empty": True}},
+                    {"property": "Статус", "select": {"equals": "Отвечено"}}]}
+
+
+async def review_pending():
+    """Непроверенные ответы, старые первыми: [{id, question, answer, source, who, when}]."""
+    body = {"page_size": 100, "filter": _review_filter(),
+            "sorts": [{"property": "Дата и время", "direction": "ascending"}]}
+    data = await _req("POST", f"/databases/{config.JOURNAL_DB_ID}/query", body)
+    out = []
+    for r in data["results"]:
+        p = r["properties"]
+        out.append({"id": r["id"].replace("-", ""), "question": _text(p.get("Вопрос")), "answer": _text(p.get("Ответ")),
+                    "source": _text(p.get("Документ-источник")), "who": _text(p.get("Сотрудник")),
+                    "when": ((p.get("Дата и время") or {}).get("date") or {}).get("start", "")})
+    return out
+
+
+async def review_count():
+    n, cursor = 0, None
+    while True:
+        body = {"page_size": 100, "filter": _review_filter()}
+        if cursor:
+            body["start_cursor"] = cursor
+        data = await _req("POST", f"/databases/{config.JOURNAL_DB_ID}/query", body)
+        n += len(data["results"])
+        if not data.get("has_more"):
+            return n
+        cursor = data["next_cursor"]
+
+
+async def review_set(page_id, verdict, reason=None, comment=None):
+    props = {"Проверка": {"select": {"name": verdict}}}
+    if reason:
+        props["Причина"] = {"select": {"name": reason}}
+    if comment is not None:
+        props["Комментарий проверяющего"] = _rt(comment)
+    await _req("PATCH", f"/pages/{page_id}", {"properties": props})

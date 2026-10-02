@@ -75,7 +75,14 @@ CANCEL_ROW = [InlineKeyboardButton("Отмена", callback_data="ancancel")]
 
 
 async def show_menu(app):
+    label = "🔍 Проверить ответы Марка"
+    try:
+        if config.JOURNAL_DB_ID:
+            label += f" ({await notion_api.review_count()})"
+    except Exception:
+        pass
     kbd = InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data="mn:rev")],
         [InlineKeyboardButton("📣 Разослать сотрудникам об изменении документа", callback_data="mn:ann")],
         [InlineKeyboardButton("📝 Мини-тест по документу (сначала вам)", callback_data="mn:quiz")]])
     await app.bot.send_message(config.OWNER_TELEGRAM_ID, "Что сделать?", reply_markup=kbd)
@@ -95,6 +102,10 @@ async def on_menu_button(update, ctx):
     if q.data == "mn:ann":
         await q.edit_message_text("Выберите документ ниже.")
         await _announce_list(ctx.application)
+    elif q.data == "mn:rev":
+        import review
+        await q.edit_message_text("Открываю проверку ответов…")
+        await review.start(ctx.application)
     elif q.data == "mn:quiz":
         await q.edit_message_text("Составляю мини-тест по документу, около минуты…")
         await start_trial(ctx.application)
@@ -161,6 +172,9 @@ async def owner_flow_text(update, ctx):
     """Кнопка «📋 Меню» и текст владельца, когда бот ждёт описание изменений. True — сообщение обработано."""
     if _is_owner(update) and (update.effective_message.text or "").strip() == MENU_BTN:
         await show_menu(ctx.application)
+        return True
+    import review
+    if await review.comment_text(update, ctx):
         return True
     flow = ctx.application.bot_data.get("an_flow")
     if not flow or "change" in flow or not _is_owner(update):

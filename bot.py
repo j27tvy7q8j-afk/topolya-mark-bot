@@ -16,6 +16,7 @@ from telegram.ext import (Application, ApplicationBuilder, CommandHandler, Conte
 import config
 import drive_reader
 import learning
+import review
 import llm
 import notion_api
 from kb import KB
@@ -363,6 +364,7 @@ async def post_init(app: Application):
     spawn(learning.reminder_loop(app))
     spawn(learning.quiz_loop(app))
     spawn(learning.watch_loop(app))
+    spawn(review.nudge_loop(app))
     spawn(learning.set_menu(app))
     spawn(learning.startup_check(app))
 
@@ -383,6 +385,7 @@ def main():
     app.add_handler(CallbackQueryHandler(learning.on_announce_pick, pattern=r"^an:\d+$"))
     app.add_handler(CallbackQueryHandler(learning.on_announce_confirm, pattern=r"^an(send|cancel)$"))
     app.add_handler(CallbackQueryHandler(learning.on_menu_button, pattern=r"^mn:"))
+    app.add_handler(CallbackQueryHandler(review.on_review_button, pattern=r"^rv:"))
     app.add_handler(CallbackQueryHandler(learning.on_quiz_all, pattern=r"^qa:"))
     app.add_handler(CallbackQueryHandler(learning.on_proposal_button, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(learning.on_ack_button, pattern=r"^ack:"))
