@@ -711,7 +711,7 @@ async def set_menu(app):
 
 async def startup_check(app):
     """После запуска проверяет доступ к базам рассылок и тестов. Владельцу: один раз «готово» или тревога, если нет доступа."""
-    await asyncio.sleep(30)
+    await asyncio.sleep(90)
     bad = []
     for name, db in (("Марк — Ознакомления", config.ACK_DB_ID), ("Марк — Результаты тестов", config.QUIZ_DB_ID)):
         try:
@@ -740,3 +740,20 @@ async def startup_check(app):
             save_state(st)
         except Exception:
             log.exception("не удалось отправить уведомление о готовности")
+    if not bad and not st.get("trial_sent"):
+        # один раз: пробный тест только владельцу, чтобы он увидел вопросы до первого автотеста
+        st["trial_sent"] = True
+        save_state(st)
+        try:
+            qid, doc, sent, failed = await send_quiz(app, app.bot_data["kb"],
+                                                     [{"tg_id": config.OWNER_TELEGRAM_ID, "name": "Владелец"}])
+            await app.bot.send_message(config.OWNER_TELEGRAM_ID,
+                f"Выше пробный мини-тест по «{doc.title}», он пришёл только вам. Пройдите его: так вы увидите, как "
+                "выглядят вопросы. Если что-то не так, напишите мне в чат проекта.")
+        except Exception as e:
+            log.warning("Пробный тест не составлен: %s", e)
+            try:
+                await app.bot.send_message(config.OWNER_TELEGRAM_ID,
+                    f"⚠️ Пробный мини-тест не составился: {e}. Попробуйте вручную через меню: /quiz_now.")
+            except Exception:
+                pass
