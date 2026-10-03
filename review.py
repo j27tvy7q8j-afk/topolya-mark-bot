@@ -96,13 +96,27 @@ async def next_card(app, edit=None):
         app.bot_data["rv_groups"] = {i["id"]: i["ids"] for i in queue}
         app.bot_data["rv_q"] = {i["id"]: i["question"] for i in queue}
         text, kbd = card_text(queue[0], len(queue)), card_markup(queue[0])
+    sent = False
     if edit is not None:
         try:
             await edit.edit_message_text(text, reply_markup=kbd)
-            return
+            sent = True
         except Exception:
             pass
-    await app.bot.send_message(config.OWNER_TELEGRAM_ID, text, reply_markup=kbd)
+    if not sent:
+        await app.bot.send_message(config.OWNER_TELEGRAM_ID, text, reply_markup=kbd)
+    if kbd is None:
+        await _restore_keyboard(app)
+
+
+async def _restore_keyboard(app):
+    """Когда очередь закончилась, заново показываем кнопки «Меню» и «Помощь» внизу чата."""
+    import learning
+    try:
+        await app.bot.send_message(config.OWNER_TELEGRAM_ID, "Кнопка «📋 Меню» внизу экрана.",
+                                   reply_markup=learning.owner_keyboard())
+    except Exception as e:
+        log.warning("Кнопки меню не показаны: %s", e)
 
 
 async def start(app):
@@ -138,6 +152,7 @@ async def on_review_button(update, ctx):
         await q.answer()
         app.bot_data.pop("rv_flow", None)
         await q.edit_message_text("Проверка остановлена. Продолжить можно в «📋 Меню».")
+        await _restore_keyboard(app)
         return
     if act == "skip":
         app.bot_data.setdefault("rv_skip", set()).add(pid)
