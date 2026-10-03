@@ -202,6 +202,7 @@ def _ack_row(r):
     return {"page_id": r["id"], "doc": _text(pr.get("Документ")), "change": _text(pr.get("Что изменилось")),
             "name": _text(pr.get("Сотрудник")), "tg_id": int((pr.get("Telegram ID") or {}).get("number") or 0),
             "done": bool((pr.get("Ознакомился") or {}).get("checkbox")),
+            "opened": bool(((pr.get("Открыл документ") or {}).get("date") or {}).get("start")),
             "reminders": int((pr.get("Напоминаний") or {}).get("number") or 0),
             "sent": datetime.fromisoformat(sent) if sent else None, "bid": _text(pr.get("Рассылка"))}
 
@@ -213,6 +214,10 @@ async def ack_get(page_id):
 async def ack_mark(page_id):
     await _req("PATCH", f"/pages/{page_id}", {"properties": {
         "Ознакомился": {"checkbox": True}, "Дата ознакомления": {"date": {"start": _now()}}}})
+
+
+async def ack_opened(page_id):
+    await _req("PATCH", f"/pages/{page_id}", {"properties": {"Открыл документ": {"date": {"start": _now()}}}})
 
 
 async def ack_open():

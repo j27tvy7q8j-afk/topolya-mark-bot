@@ -146,6 +146,15 @@ def _chunks_text(text, size=3800):
     return out
 
 
+async def _mark_opened(row, row_id):
+    if row.get("opened"):
+        return
+    try:
+        await notion_api.ack_opened(row_id)
+    except Exception as e:
+        log.warning("Отметка «открыл документ» не записана: %s", e)
+
+
 async def on_open_doc(update, ctx):
     """Кнопка «Открыть документ»: бот присылает документ сотруднику (PDF; таблицы и запасной вариант — текстом)."""
     import io
@@ -177,6 +186,7 @@ async def on_open_doc(update, ctx):
             f = io.BytesIO(data)
             f.name = re.sub(r"[\\/:*?\"<>|]+", " ", doc.title).strip()[:80] + ".pdf"
             await ctx.application.bot.send_document(chat_id, f, caption=f"«{doc.title}»")
+            await _mark_opened(row, row_id)
             return
         except Exception as e:
             log.warning("PDF не выгрузился для «%s»: %s", doc.title, e)
@@ -192,6 +202,7 @@ async def on_open_doc(update, ctx):
     for i, part in enumerate(parts):
         head = f"«{doc.title}»\n\n" if i == 0 else ""
         await ctx.application.bot.send_message(chat_id, head + part)
+    await _mark_opened(row, row_id)
 
 
 async def _announce_list(app):
@@ -364,7 +375,8 @@ async def reminder_pass(app, now=None):
     if escalate and config.OWNER_TELEGRAM_ID:
         by_doc = {}
         for r in escalate:
-            by_doc.setdefault(r["doc"], []).append(_short_name(r["name"]) or str(r["tg_id"]))
+            nm = _short_name(r["name"]) or str(r["tg_id"])
+            by_doc.setdefault(r["doc"], []).append(nm if r.get("opened") else nm + " (не открывал документ)")
         text = "Не ознакомились за 3 суток (после двух напоминаний):\n" + "\n".join(
             f"- «{d}»: {', '.join(names)}" for d, names in by_doc.items())
         try:
