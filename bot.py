@@ -389,6 +389,7 @@ def main():
     app.add_handler(CallbackQueryHandler(learning.on_quiz_all, pattern=r"^qa:"))
     app.add_handler(CallbackQueryHandler(learning.on_proposal_button, pattern=r"^pr:"))
     app.add_handler(CallbackQueryHandler(learning.on_ack_button, pattern=r"^ack:"))
+    app.add_handler(CallbackQueryHandler(learning.on_open_doc, pattern=r"^od:"))
     app.add_handler(CallbackQueryHandler(learning.on_quiz_button, pattern=r"^qz:"))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

@@ -40,6 +40,13 @@ def read_document(file_id):
     return data.decode("utf-8", "replace").lstrip("﻿").strip()
 
 
+def export_pdf(file_id):
+    """PDF-копия Google-документа (байты). Только для документов, не для таблиц."""
+    with _lock:
+        drive, _ = _services()
+        return drive.files().export(fileId=file_id, mimeType="application/pdf").execute()
+
+
 def read_sheet(file_id, allowed_tabs=None):
     """Текст таблицы. allowed_tabs — множество разрешённых листов (нижний регистр) или None (все)."""
     with _lock:

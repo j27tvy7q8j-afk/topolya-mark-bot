@@ -119,13 +119,79 @@ def _flat(s):
 
 def ann_text(title, change, reminder=False):
     head = "Напоминание. Вы ещё не отметили ознакомление." if reminder else "Новая или изменённая редакция документа."
-    return (f"📄 {head}\nДокумент: «{title}»\nЧто изменилось: {change}\n\n"
-            "Прочитать документ можно у администратора, а любой вопрос по нему можно задать мне прямо здесь. "
-            "Когда ознакомитесь, нажмите кнопку.")
+    return (f"📄 {head}\nДокумент: «{title}»\nКоротко: {change}\n\n"
+            "Откройте документ кнопкой ниже и прочитайте. Любой вопрос по нему можно задать мне прямо здесь. "
+            "Когда ознакомитесь, нажмите «Ознакомился».")
 
 
-def ack_markup(row_id):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Ознакомился", callback_data="ack:" + row_id)]])
+def ack_markup(row_id, done=False):
+    open_btn = InlineKeyboardButton("📄 Открыть документ", callback_data="od:" + row_id)
+    if done:
+        return InlineKeyboardMarkup([[open_btn]])
+    return InlineKeyboardMarkup([[open_btn, InlineKeyboardButton("✅ Ознакомился", callback_data="ack:" + row_id)]])
+
+
+def _chunks_text(text, size=3800):
+    out, cur = [], ""
+    for line in (text or "").splitlines(keepends=True):
+        while len(line) > size:
+            if cur:
+                out.append(cur); cur = ""
+            out.append(line[:size]); line = line[size:]
+        if len(cur) + len(line) > size:
+            out.append(cur); cur = ""
+        cur += line
+    if cur.strip():
+        out.append(cur)
+    return out
+
+
+async def on_open_doc(update, ctx):
+    """Кнопка «Открыть документ»: бот присылает документ сотруднику (PDF; таблицы и запасной вариант — текстом)."""
+    import io
+    import drive_reader
+    q = update.callback_query
+    row_id = (q.data or "").split(":", 1)[1]
+    try:
+        row = await notion_api.ack_get(row_id)
+    except Exception as e:
+        log.warning("od ack_get %s: %s", row_id, e)
+        await q.answer("Не получилось открыть. Нажмите ещё раз через минуту.", show_alert=True)
+        return
+    if q.from_user.id != row["tg_id"]:
+        await q.answer("Эта кнопка не для вас.", show_alert=True)
+        return
+    kb = ctx.application.bot_data["kb"]
+    try:
+        doc = next((d for d in await kb.catalog() if d.title == row["doc"]), None)
+    except Exception:
+        doc = None
+    if not doc:
+        await q.answer("Документ сейчас недоступен. Обратитесь к администратору.", show_alert=True)
+        return
+    await q.answer("Отправляю документ…")
+    chat_id = q.from_user.id
+    if doc.kind == "doc":
+        try:
+            data = await asyncio.to_thread(drive_reader.export_pdf, doc.file_id)
+            f = io.BytesIO(data)
+            f.name = re.sub(r"[\\/:*?\"<>|]+", " ", doc.title).strip()[:80] + ".pdf"
+            await ctx.application.bot.send_document(chat_id, f, caption=f"«{doc.title}»")
+            return
+        except Exception as e:
+            log.warning("PDF не выгрузился для «%s»: %s", doc.title, e)
+    try:
+        text = await kb.text(doc)
+    except Exception as e:
+        log.warning("Текст документа «%s» недоступен: %s", doc.title, e)
+        text = ""
+    if not text:
+        await ctx.application.bot.send_message(chat_id, "Не получилось открыть документ. Обратитесь к администратору.")
+        return
+    parts = _chunks_text(text)
+    for i, part in enumerate(parts):
+        head = f"«{doc.title}»\n\n" if i == 0 else ""
+        await ctx.application.bot.send_message(chat_id, head + part)
 
 
 async def _announce_list(app):
@@ -162,10 +228,19 @@ async def on_announce_pick(update, ctx):
     except Exception:
         await q.answer("Список устарел: нажмите «📋 Меню» и выберите рассылку заново.", show_alert=True)
         return
-    ctx.application.bot_data["an_flow"] = {"title": title, "file_id": fid}
     await q.answer()
-    await q.edit_message_text(f"Документ: «{title}».\nНапишите одним-двумя предложениями, что нового или что "
-                              "изменилось: это увидят сотрудники.", reply_markup=InlineKeyboardMarkup([CANCEL_ROW]))
+    await q.edit_message_text(f"Документ: «{title}». Готовлю текст для сотрудников, около минуты…")
+    kb = ctx.application.bot_data["kb"]
+    draft = ""
+    try:
+        doc = next((d for d in await kb.catalog() if d.file_id == fid), None)
+        text = await kb.text(doc) if doc else ""
+        draft = await describe_doc(kb, text) if text else ""
+    except Exception as e:
+        log.warning("Черновик рассылки не составлен: %s", e)
+    st = load_state()
+    await _propose(ctx.application, st, title, fid, draft, f"Документ: «{title}».")
+    save_state(st)
 
 
 async def owner_flow_text(update, ctx):
@@ -262,7 +337,8 @@ async def on_ack_button(update, ctx):
             await q.answer("Не удалось сохранить отметку, нажмите ещё раз через минуту.", show_alert=True)
             return
     await q.answer("Отмечено")
-    await q.edit_message_text((q.message.text or "") + f"\n\n✅ Ознакомление отмечено {datetime.now(TZ):%d.%m.%Y %H:%M}.")
+    await q.edit_message_text((q.message.text or "") + f"\n\n✅ Ознакомление отмечено {datetime.now(TZ):%d.%m.%Y %H:%M}.",
+                              reply_markup=ack_markup(row_id, done=True))
 
 
 async def reminder_pass(app, now=None):
