@@ -134,8 +134,34 @@ async def _write(q, fn):
         return False
 
 
+def _flow_set(app, flow):
+    """Состояние «жду комментарий» хранится на диске: переживает перезапуск бота."""
+    import learning
+    app.bot_data["rv_flow"] = flow
+    st = learning.load_state()
+    st["rv_flow"] = flow
+    learning.save_state(st)
+
+
+def _flow_get(app):
+    import learning
+    flow = app.bot_data.get("rv_flow")
+    if flow is None:
+        flow = learning.load_state().get("rv_flow")
+    return flow
+
+
+def _flow_clear(app):
+    import learning
+    app.bot_data.pop("rv_flow", None)
+    st = learning.load_state()
+    if st.pop("rv_flow", None) is not None:
+        learning.save_state(st)
+
+
 async def _ask_text(app, q, pid, kind, prompt):
-    app.bot_data["rv_flow"] = {"pid": pid, "kind": kind, "ts": time.time()}
+    _flow_set(app, {"pid": pid, "kind": kind, "ts": time.time(), "ids": _ids(app, pid),
+                    "q": (app.bot_data.get("rv_q") or {}).get(pid, "")})
     await q.edit_message_text(prompt, reply_markup=InlineKeyboardMarkup(
         [[InlineKeyboardButton("Без комментария", callback_data=f"rv:nc:{pid}")]]))
 
@@ -150,7 +176,7 @@ async def on_review_button(update, ctx):
     ids = _ids(app, pid)
     if act == "stop":
         await q.answer()
-        app.bot_data.pop("rv_flow", None)
+        _flow_clear(app)
         await q.edit_message_text("Проверка остановлена. Продолжить можно в «📋 Меню».")
         await _restore_keyboard(app)
         return
@@ -203,28 +229,28 @@ async def on_review_button(update, ctx):
         return
     if act == "nc":
         await q.answer()
-        app.bot_data.pop("rv_flow", None)
+        _flow_clear(app)
         await next_card(app, edit=q)
 
 
 async def comment_text(update, ctx):
     """Текст владельца как комментарий к проверке. True — обработано."""
     app = ctx.application
-    flow = app.bot_data.get("rv_flow")
+    flow = _flow_get(app)
     u = update.effective_user
     if not flow or not u or u.id != config.OWNER_TELEGRAM_ID:
         return False
     if time.time() - flow["ts"] > 3600:
-        app.bot_data.pop("rv_flow", None)
+        _flow_clear(app)
         return False
-    app.bot_data.pop("rv_flow", None)
+    _flow_clear(app)
     text = (update.effective_message.text or "").strip()[:1900]
     pid, kind = flow["pid"], flow["kind"]
     try:
-        for i in _ids(app, pid):
+        for i in flow.get("ids") or [pid]:
             await notion_api.review_set(i, "Неверно" if kind == "bad" or kind == "gap" else "Верно", comment=text)
         if kind == "gap":
-            q = (app.bot_data.get("rv_q") or {}).get(pid, "")
+            q = flow.get("q") or (app.bot_data.get("rv_q") or {}).get(pid, "")
             if q:
                 await notion_api.gap_set_comment(q, text)
         await update.effective_message.reply_text("Записал.")
